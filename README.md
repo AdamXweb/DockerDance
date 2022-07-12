@@ -1,4 +1,4 @@
-# docker-management
+# Docker Dance
 My Docker management scripts and structures from a homelab *enthusiast*.
 This script allows you to **bulk manage** services that have been setup by `docker compose` in folders.
 
@@ -18,7 +18,7 @@ This provides an easier way to update, restart and backup apps/services.
 ### Basic Usage
 The folders have been setup for use on a new server to make use of the script's structure.
 If you are starting on a new server, you can clone the contents of this repo directly into your user folder with 
-`git clone https://github.com/AdamXweb/docker-management.git .`
+`git clone https://github.com/AdamXweb/DockerDance.git .`
 
 ### Precautions
 Please note that this script was designed to work in my environment. The output fit the needs that I face to bulk manage docker apps/services.
@@ -27,11 +27,11 @@ that by downloading the install script first, looking through it so everything l
 then running it:
 
 #### Downloading the script
-Docker management can be used as the script itself by downloading with a method of your choice, either directly or [from the releases](https://github.com/AdamXweb/docker-management/releases)
+Docker management can be used as the script itself by downloading with a method of your choice, either directly or [from the releases](https://github.com/AdamXweb/DockerDance/releases)
 | Method    | Command                                                                                           |
 | :-------- | :------------------------------------------------------------------------------------------------ |
-| **curl**  | `sh -c "$(curl -fsSL https://raw.githubusercontent.com/adamxweb/docker-management/master/docker_volumes/manage.sh)"` |
-| **wget**  | `sh -c "$(wget -O- https://raw.githubusercontent.com/ohmyzsh/docker-management/master/docker_volumes/manage.sh)"`   |
+| **curl**  | `sh -c "$(curl -fsSL https://raw.githubusercontent.com/adamxweb/DockerDance/master/docker_volumes/manage.sh)"` |
+| **wget**  | `sh -c "$(wget -O- https://raw.githubusercontent.com/ohmyzsh/DockerDance/master/docker_volumes/manage.sh)"`   |
 
 
 #### Customise variables
@@ -70,7 +70,7 @@ At the moment the script is limited to backing up files in each directory.
 Its function acts as an all in one for my use; It stops the container, backs up, updates and starts.
 
 ### Restore 
-- todo see issue [#2](https://github.com/AdamXweb/docker-management/issues/2)
+- todo see issue [#2](https://github.com/AdamXweb/DockerDance/issues/2)
 
 #### Minor commands
 `./manage.sh version`
