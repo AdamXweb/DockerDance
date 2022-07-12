@@ -32,34 +32,49 @@ checkDefault() {
 }
 
 
+#Add stlying
+bold=$(tput bold)
+normal=$(tput sgr0)
+
+actioninfo() {
+  echo "${bold}[action]:${normal} ⇒ $1"
+}
+ok() {
+  echo "${bold}[ok]${normal} - $1"
+}
+success() {
+  echo "${bold}[success]${normal} - $1"
+}
+
 # TODO use getopt at some stage to make a flag -a set variable to $apps
 COMMAND=$1 && shift 1
 
 case "$COMMAND" in
   'backup' )
     checkDefault
-    echo "Backing up apps including:"
+    actioninfo "${bold}Backing up${normal} apps including:"
     for i in $Apps
     do
-      echo "$i"
+      echo "⇒ $i"
     done
+    echo "---"
     for i in $Apps
     do
-        echo "Stopping $i"
+        echo "Stopping ${bold}$i${normal}"
         cd $i
         $DOCKER_COMPOSE_COMMAND kill
-        echo "$i stopped"
+        ok 
         echo "Backing up $i"
         tar -cjf $TARGET$i$(date '+%Y-%m-%d').tar.bz2 $DOCKER_VOLUMES$i
-        echo "$i is backed up"
+        ok "$i is backed up"
         echo "Updating $i"
         $DOCKER_COMPOSE_COMMAND pull
-        echo "Images up to date. Starting all services."
+        ok "Images up to date. Starting all services."
         $DOCKER_COMPOSE_COMMAND up -d
-        echo "$i backed up, updated and running"
+        ok "$i backed up, updated and running"
         cd ..
     done
-    echo "Backing up completed"
+    success "Backing up completed"
     ;;
   'restore' )
     echo "Coming soon:"
@@ -67,7 +82,7 @@ case "$COMMAND" in
   'logs' )
     for i in $Apps
     do
-      echo "Getting $i logs"
+      echo "Getting ${bold}$i${normal} logs"
       cd $i
       $DOCKER_COMPOSE_COMMAND logs -f
       cd ..
@@ -75,82 +90,82 @@ case "$COMMAND" in
     ;;
   'update' )
     checkDefault
-    echo "Updating all services."
+    actioninfo "${bold}Updating all services.${normal}"
     for i in $Apps
     do
-      echo "$i"
+      echo "⇒ $i"
     done
     echo "---"
     for i in $Apps
     do
-        echo "Stopping $i"
+        echo "Stopping ${bold}$i${normal}"
         cd $i
         $DOCKER_COMPOSE_COMMAND kill
-        echo "$i stopped"
+        ok "$i stopped"
         echo "Updating $i"
         $DOCKER_COMPOSE_COMMAND pull
-        echo "Images up to date. Starting all services."
+        ok "Images up to date. Starting all services."
         $DOCKER_COMPOSE_COMMAND up -d
-        echo "$i Updated and running"
+        ok "$i Updated and running"
         cd ..
     done
-    echo "Services updated. Give them a moment to warm up."
+    success "Services updated. Give them a moment to warm up."
     ;;
   'stop' )
     checkDefault
-    echo "Stopping all services:"
+    actioninfo "${bold}Stopping${normal} all services:"
     for i in $Apps
     do
-      echo "$i"
+      echo "⇒ $i"
     done
     echo "---"
     for i in $Apps
     do
-        echo "Stopping $i"
+        echo "Stopping ${bold}$i${normal}"
         cd $i
         $DOCKER_COMPOSE_COMMAND kill
-        echo "$i stopped"
+        ok "$i stopped"
         cd ..
     done
-    echo "Services stopped"
+    success "Services stopped"
     ;;
   'start' )
     checkDefault
-    echo "Starting all services"
+    actioninfo "${bold}Starting${normal} all services"
     for i in $Apps
     do
-      echo "$i"
+      echo "⇒ $i"
     done
     echo "---"
     for i in $Apps
     do
-        echo "Starting $i"
+        echo "Starting ${bold}$i${normal}"
         cd $i
         $DOCKER_COMPOSE_COMMAND up -d
-        echo "$i started"
+        ok "$i started"
         cd ..
     done
-    echo "Services started. Give them a moment to warm up."
+    success "Services started. Give them a moment to warm up."
     ;;
   'restart' )
     checkDefault
-    echo "Restarting all services"
+    actioninfo "${bold}Restarting${normal} all services"
     for i in $Apps
     do
-        echo "Stopping $i"
+        echo "Stopping ${bold}$i${normal}"
         cd $i
         $DOCKER_COMPOSE_COMMAND kill
-        echo "$i stopped"
+        ok "$i stopped"
         $DOCKER_COMPOSE_COMMAND up -d
-        echo "$i restarted"
+        ok "$i restarted"
         cd ..
     done
-    echo "Services restarted. Give them a moment to warm up."
+    success "Services restarted. Give them a moment to warm up."
     ;;
   'version' )
     for i in $Apps
       do
-          echo "Getting $i version"
+          echo "Getting ${bold}$i${normal} version"
           cd $i
           $DOCKER_COMPOSE_COMMAND images
           cd ..
@@ -164,6 +179,7 @@ case "$COMMAND" in
     echo "Updating system with apt."
     apt update && apt upgrade -y
     apt-get update && apt upgrade -y
+    success "System updated"
     ;;
   * )
     echo "Unknown command"
