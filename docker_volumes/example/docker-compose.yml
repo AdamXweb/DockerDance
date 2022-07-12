@@ -1,0 +1,8 @@
+version: '3.8'
+services:
+  hello:
+    image: alpine    
+    tty: false
+    volumes:
+      - ./:/volume
+    command:  [/bin/echo, 'Test docker compose file']

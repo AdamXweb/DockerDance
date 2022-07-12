@@ -1,0 +1,85 @@
+---
+name: Bug report 🐛
+description: Create a report to help us improve
+title: "[BUG] <title>"
+labels: bug
+assignees:
+ - adamxweb
+
+body:
+ - type: textarea
+   id: repro
+   attributes:
+      label: Describe the problem
+      description: Please describe exactly what is not working, include the steps to reproduce, actual result and expected result
+   validations:
+      required: true
+ - type: input
+   id: version
+   attributes:
+      label: Version
+      description: What version of docker management script are you using?
+      placeholder: 0.1 ← should look like this (or commit ID)
+   validations:
+      required: true
+ - type: input
+   id: operatingsystem
+   attributes:
+      label: OS
+      description: What OS are you using?
+      placeholder: MacOS 12.4, Debian 11.2, Ubuntu 20.04.1 etc.
+   validations:
+      required: true
+ - type: input
+   id: dockerversion
+   attributes:
+      label: Docker Version
+      description: What version of Docker are you using?
+      placeholder: e.g. 20.10.17 | You can type `docker -v` to get verison
+   validations:
+      required: true
+- type: input
+   id: dockercomposeversion
+   attributes:
+      label: Docker Compose Version
+      description: What version of Docker compose are you using?
+      placeholder: e.g. v2.6.0 | You can type `docker compose version` to get verison
+   validations:
+      required: true
+ - type: input
+   id: environment
+   attributes:
+      label: Usage 
+      description: What options did you use with the script?
+      placeholder: backup, update, stop etc.
+   validations:
+      required: false
+ 
+ - type: textarea
+   id: logs
+   attributes:
+      label: Additional info
+      description: Do you have Screenshots? Please include them here with extra information!
+      placeholder: If the issue relates to installation include path you are copying to. For visual issues, please try to include screenshots of the issue and if possible what it should be. Take care to blank out any personal info.
+   validations:
+      required: false
+ - type: checkboxes
+   id: idiot-check
+   attributes:
+      label: Please tick the boxes
+      description: Before submitting, please ensure that
+      options:
+        - label: You are using a [current](https://github.com/AdamXweb/docker-management/releases/) version of the script. (check the date associated with the version)
+          required: true
+        - label: You've checked that this [issue hasn't already been raised](https://github.com/adamxweb/docker-management/issues?q=is%3Aissue)
+          required: true
+
+ - type: markdown
+   attributes:
+      value: |-
+        ## Thanks 🙏
+        Sorry you are having issues with the docker management script, and thank you for raising this ticket - in doing so you are helping to make the script better for everyone 💪
+        You should expect a reply within the next 48 hours :)
+        ⭐️ If you are not a bot, please star the repo before submitting your ticket.
+   validations:
+      required: false
