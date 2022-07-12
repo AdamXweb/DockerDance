@@ -70,7 +70,7 @@ At the moment the script is limited to backing up files in each directory.
 Its function acts as an all in one for my use; It stops the container, backs up, updates and starts.
 
 ### Restore 
-- todo see issue #2
+- todo see issue [#2](https://github.com/AdamXweb/docker-management/issues/2)
 
 #### Minor commands
 `./manage.sh version`
