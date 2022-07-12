@@ -1,4 +1,13 @@
-# Docker Dance
+<p align="center">
+    <img width="120" src="https://user-images.githubusercontent.com/6800453/178521052-0455c0d3-cf6c-4cea-9633-db0b7853c57b.svg?raw=true">
+    <h1 align="center">Docker Dance</h1>
+</p>
+<p align="center">
+    <img width="500" src="https://user-images.githubusercontent.com/6800453/178521272-3639e416-8915-4f21-9d7e-4f484852c839.gif?raw=true">
+</p>
+
+
+
 My Docker management scripts and structures from a homelab *enthusiast*.
 This script allows you to **bulk manage** services that have been setup by `docker compose` in folders.
 
