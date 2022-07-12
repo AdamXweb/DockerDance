@@ -140,6 +140,7 @@ I have another system that connects and executes an [rsync](https://download.sam
 - Folder names identified under Apps can have a dot e.g `.n8n` at the front or special characters `uptime-kuma` as long as each entry is separated by a space e.g. `Apps=".n8n uptime-kuma linkace"`.
 - Non executable scripts may need permissions updated with `chmod +x ./docker_volumes/manage.sh` to ensure permissions are executable
 - backups may fail if you run out of space / if this is run on a cron to a local folder.
+- backups may fail if you don't have the backup folder. Error may include `Cannot open: No such file or directory tar (child): Error is not recoverable: exiting now`
 
 ## Things to improve
 - Code could be refactored as there are multiple repeating elements
