@@ -56,21 +56,21 @@ Side note, the script executes commands in the order they are listed as e.g. `Ap
 First, make sure you are in the `docker_volumes` folder, and execute any of the commands below/
 
 ### Stop
-`./manage.sh backup`
+`./manage.sh stop`
 
 Stops all the apps by navigating through each folder and stopping the docker process
 
 ### Start
-`./manage.sh backup`
+`./manage.sh start`
 
 Starts all the apps by navigating through each folder and starting with `docker compose up -d`
 
 ### Update
-`./manage.sh backup`
+`./manage.sh update`
 Stops all the apps, pulls the latest version and recreates container
 
 ### Restart
-`./manage.sh backup`
+`./manage.sh restart`
 Stops all the apps, then starts them up again.
 
 ### Backup
