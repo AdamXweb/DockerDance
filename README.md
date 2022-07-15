@@ -173,4 +173,4 @@ There is a 'test' logic in the script to make sure you change the example variab
 
 ## License
 
-docker management is released under the MIT license.
+Docker Dance is released under the MIT license.
