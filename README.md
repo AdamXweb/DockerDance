@@ -57,6 +57,11 @@ First, make sure you are in the `docker_volumes` folder, and execute any of the 
 
 Every command runs against all the apps in the `Apps` variable by default. To target one or more specific apps, add their folder names after the command, e.g. `./manage.sh restart linkace` or `./manage.sh update linkace uptime-kuma`.
 
+### Interactive menu
+`./manage.sh`
+
+Running the script with no arguments on a terminal opens a simple menu: pick a command, then pick an app (or all apps). If [fzf](https://github.com/junegunn/fzf) is installed it's used to fuzzy-pick the app; otherwise a plain numbered menu is shown — no extra dependencies required. Cron and piped usage are unaffected: without a terminal the script prints usage instead of waiting for input.
+
 ### Stop
 `./manage.sh stop`
 

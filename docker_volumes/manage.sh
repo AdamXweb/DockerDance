@@ -278,8 +278,82 @@ run_command() {
   esac
 }
 
+pick_app() {
+  #Sets PICKED_APP to one app name, or "" for all apps. Returns 1 if cancelled.
+  PICKED_APP=""
+  if command -v fzf >/dev/null 2>&1; then
+    PICKED_APP=$(printf '%s\n' "all apps" "$@" | fzf --prompt="app> ") || return 1
+    if [ "$PICKED_APP" = "all apps" ]; then
+      PICKED_APP=""
+    fi
+    return 0
+  fi
+  n=0
+  echo "  0) all apps"
+  for app in "$@"; do
+    n=$((n + 1))
+    echo "  $n) $app"
+  done
+  printf "Select an app [0-%s]: " "$n"
+  read -r selection || return 1
+  if [ "$selection" = "0" ]; then
+    return 0
+  fi
+  n=0
+  for app in "$@"; do
+    n=$((n + 1))
+    if [ "$n" = "$selection" ]; then
+      PICKED_APP=$app
+      return 0
+    fi
+  done
+  echo "Not a valid selection."
+  return 1
+}
+
+interactive() {
+  checkDefault
+  require_docker
+  ALL_APPS=$Apps
+  while :; do
+    echo ""
+    echo "${bold}DockerDance${normal} - what would you like to do?"
+    echo "  1) start    2) stop     3) restart"
+    echo "  4) update   5) backup   6) logs"
+    echo "  7) version  8) running  q) quit"
+    printf "> "
+    read -r choice || break
+    case "$choice" in
+      1 ) choice="start" ;;
+      2 ) choice="stop" ;;
+      3 ) choice="restart" ;;
+      4 ) choice="update" ;;
+      5 ) choice="backup" ;;
+      6 ) choice="logs" ;;
+      7 ) choice="version" ;;
+      8 ) choice="running" ;;
+      q | Q | quit | exit ) break ;;
+      * ) echo "Not a valid choice."; continue ;;
+    esac
+    Apps=$ALL_APPS
+    if [ "$choice" != "running" ]; then
+      # shellcheck disable=SC2086 # Apps is an intentionally space-separated list
+      pick_app $Apps || continue
+      if [ -n "$PICKED_APP" ]; then
+        Apps=$PICKED_APP
+      fi
+    fi
+    run_command "$choice"
+  done
+}
+
 APPS_OVERRIDDEN=0
 if [ $# -eq 0 ]; then
+  if [ -t 0 ]; then
+    #No arguments on a terminal: offer the interactive menu
+    interactive
+    exit 0
+  fi
   usage
   exit 1
 fi
