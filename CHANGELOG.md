@@ -5,10 +5,10 @@ All notable changes to DockerDance are documented here. The format follows
 [Semantic Versioning](https://semver.org/). `./manage.sh update-self` updates to
 the latest tagged release.
 
-## [Unreleased]
+## [0.3.0] - 2026-07-13
 
-The changes below are on the way to the next release. Until they're tagged,
-`update-self` will not offer them.
+The first release since v0.1.0 - a substantial robustness, safety and UX
+overhaul. `./manage.sh update-self` will offer this to anyone on v0.1.0.
 
 ### Added
 - **`status` dashboard.** One line per app - a coloured up/stopped dot,
@@ -39,7 +39,7 @@ The changes below are on the way to the next release. Until they're tagged,
   back in place: stops the app, moves the current data aside to
   `<app>.pre-restore.<timestamp>` (nothing is deleted), extracts, and starts
   again. Asks for confirmation, rolls back if extraction fails, and reads both
-  the new relative-path archives and pre-v0.2.0 absolute-path ones.
+  the new relative-path archives and older v0.1.0-era absolute-path ones.
 - **`system-update` command.** Detects the host package manager — apt-get, dnf,
   yum, pacman, zypper, apk or brew — and runs the right non-interactive update,
   with per-manager root handling. `apt` remains as an alias.
@@ -102,5 +102,5 @@ The changes below are on the way to the next release. Until they're tagged,
 - Initial release: bulk `start` / `stop` / `restart` / `update` / `backup` of
   docker-compose apps laid out in per-app folders.
 
-[Unreleased]: https://github.com/AdamXweb/DockerDance/compare/v0.1.0...HEAD
+[0.3.0]: https://github.com/AdamXweb/DockerDance/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/AdamXweb/DockerDance/releases/tag/v0.1.0

@@ -104,7 +104,7 @@ An all-in-one per app: it pulls the latest images **while the app is still runni
 ### Restore
 `./manage.sh restore linkace`
 
-Puts the newest backup archive for the app back in place: stops the app, moves the current folder aside to `<app>.pre-restore.<timestamp>` (nothing is deleted), extracts the archive, and starts the app again. Asks for confirmation (needs a terminal, or pass `-y`). Pre-v0.2.0 archives (absolute paths) are detected and restored too. Archives are treated as untrusted: extraction happens in an isolated staging area, any path-traversal (`..`) member is refused, and only the app's own folder is promoted — a tampered archive can't write elsewhere on disk. Closes issue [#2](https://github.com/AdamXweb/DockerDance/issues/2).
+Puts the newest backup archive for the app back in place: stops the app, moves the current folder aside to `<app>.pre-restore.<timestamp>` (nothing is deleted), extracts the archive, and starts the app again. Asks for confirmation (needs a terminal, or pass `-y`). Older v0.1.0-era archives (absolute paths) are detected and restored too. Archives are treated as untrusted: extraction happens in an isolated staging area, any path-traversal (`..`) member is refused, and only the app's own folder is promoted — a tampered archive can't write elsewhere on disk. Closes issue [#2](https://github.com/AdamXweb/DockerDance/issues/2).
 
 ### Status
 `./manage.sh status`

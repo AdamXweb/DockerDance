@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 #Repo used by update-self; override with DOCKERDANCE_REPO=owner/name
 SELF_REPO="${DOCKERDANCE_REPO:-AdamXweb/DockerDance}"
 
@@ -630,8 +630,8 @@ restore_app() {
     error "No backups found for '$1' in $TARGET"
     exit 1
   fi
-  #Which layout is inside? New backups hold '<app>/...'; pre-v0.2.0 ones held
-  #absolute paths like '/home/x/docker_volumes/<app>/...'. Work out how many
+  #Which layout is inside? New backups hold '<app>/...'; older (v0.1.0-era)
+  #ones held absolute paths like '/home/x/docker_volumes/<app>/...'. Work out how many
   #leading components to strip so the app folder lands at the top of staging.
   first_member=$(tar -tjf "$archive" 2>/dev/null | head -1)
   first_rel=${first_member#/}
