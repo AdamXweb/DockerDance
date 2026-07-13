@@ -15,24 +15,95 @@ DOCKER_VOLUMES="${DOCKER_VOLUMES:-/home/$USERNAME/docker_volumes/}"
 TARGET="${DOCKER_VOLUMES}backup/"
 
 
-#Add styling (only when writing to a terminal that supports it)
-bold="" normal=""
-if [ -t 1 ] && [ -n "${TERM:-}" ] && [ "${TERM:-}" != "dumb" ] && command -v tput >/dev/null 2>&1; then
-  bold=$(tput bold) || bold=""
-  normal=$(tput sgr0) || normal=""
+#Add styling (only on a terminal that supports it; NO_COLOR=1 disables colour, see no-color.org)
+bold="" normal="" red="" green="" yellow="" cyan="" dim=""
+SPINNER=""
+if [ -t 1 ] && [ -n "${TERM:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+  SPINNER=1
+  if [ -z "${NO_COLOR:-}" ] && command -v tput >/dev/null 2>&1; then
+    bold=$(tput bold) || bold=""
+    normal=$(tput sgr0) || normal=""
+    if [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
+      red=$(tput setaf 1) || red=""
+      green=$(tput setaf 2) || green=""
+      yellow=$(tput setaf 3) || yellow=""
+      cyan=$(tput setaf 6) || cyan=""
+      dim=$(tput dim 2>/dev/null) || dim=""
+    fi
+  fi
 fi
 
+#Unicode niceties with a plain-ASCII fallback for non UTF-8 locales
+case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+  *[Uu][Tt][Ff]-8* | *[Uu][Tt][Ff]8* )
+    SPINNER_FRAMES='⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏'
+    ARROW='⇒'
+    ;;
+  * )
+    SPINNER_FRAMES='- \ | /'
+    ARROW='=>'
+    ;;
+esac
+
+STEP_LOG="${TMPDIR:-/tmp}/dockerdance-step.$$.log"
+cleanup() {
+  tput cnorm 2>/dev/null || true
+  rm -f "$STEP_LOG"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 actioninfo() {
-  echo "${bold}[action]:${normal} ⇒ $1"
+  echo "${bold}${cyan}[action]${normal} $ARROW $1"
 }
 ok() {
-  echo "${bold}[ok]${normal} - $1"
+  echo "${bold}${green}[ok]${normal} - $1"
 }
 success() {
-  echo "${bold}[success]${normal} - $1"
+  echo "${bold}${green}[success]${normal} - $1"
+}
+warn() {
+  echo "${bold}${yellow}[warn]${normal} - $1" >&2
 }
 error() {
-  echo "${bold}[error]${normal} - $1" >&2
+  echo "${bold}${red}[error]${normal} - $1" >&2
+}
+
+#Run a command behind a spinner. Output is captured and only shown if the command fails.
+#Without a terminal (cron, pipes) the label is printed and the command runs with plain output.
+run_step() {
+  step_label=$1
+  shift
+  if [ -z "$SPINNER" ]; then
+    echo "$step_label"
+    "$@"
+    return 0
+  fi
+  "$@" >"$STEP_LOG" 2>&1 &
+  step_pid=$!
+  tput civis 2>/dev/null || true
+  step_status=0
+  while kill -0 "$step_pid" 2>/dev/null; do
+    # shellcheck disable=SC2086 # frames are an intentionally space-separated list
+    for frame in $SPINNER_FRAMES; do
+      kill -0 "$step_pid" 2>/dev/null || break
+      printf '\r%s%s%s %s' "$cyan" "$frame" "$normal" "$step_label"
+      sleep 0.1 2>/dev/null || sleep 1
+    done
+  done
+  wait "$step_pid" || step_status=$?
+  printf '\r'
+  tput el 2>/dev/null || printf '%-79s\r' ''
+  tput cnorm 2>/dev/null || true
+  if [ "$step_status" -ne 0 ]; then
+    error "$step_label failed:"
+    sed 's/^/    /' "$STEP_LOG" >&2
+    rm -f "$STEP_LOG"
+    return "$step_status"
+  fi
+  rm -f "$STEP_LOG"
+  return 0
 }
 
 #Check Docker is installed, the daemon is reachable and compose is available
@@ -82,73 +153,80 @@ enter_app() {
   cd "$1"
 }
 
+#Progress counter shown when more than one app is being processed
+APP_NUM="" APP_TOTAL=""
+counter() {
+  if [ -n "$APP_TOTAL" ] && [ "$APP_TOTAL" -gt 1 ]; then
+    printf '%s[%s/%s]%s ' "$dim" "$APP_NUM" "$APP_TOTAL" "$normal"
+  fi
+}
+
+RUN_START=""
+elapsed() {
+  [ -z "$RUN_START" ] && return 0
+  e=$(( $(date +%s) - RUN_START ))
+  if [ "$e" -ge 60 ]; then
+    printf '%dm %ds' $((e / 60)) $((e % 60))
+  else
+    printf '%ds' "$e"
+  fi
+}
+
 list_apps() {
   for app in "$@"; do
-    echo "⇒ $app"
+    echo "$cyan$ARROW$normal $app"
   done
   echo "---"
 }
 
 start_app() {
-  echo "Starting ${bold}$1${normal}"
   enter_app "$1"
-  compose up -d
-  ok "$1 started"
+  run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
+  ok "$(counter)$1 started"
   cd ..
 }
 
 stop_app() {
-  echo "Stopping ${bold}$1${normal}"
   enter_app "$1"
   #stop (not kill) shuts containers down gracefully so databases can finish writing
-  compose stop
-  ok "$1 stopped"
+  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop
+  ok "$(counter)$1 stopped"
   cd ..
 }
 
 restart_app() {
-  echo "Restarting ${bold}$1${normal}"
   enter_app "$1"
-  compose stop
-  ok "$1 stopped"
-  compose up -d
-  ok "$1 restarted"
+  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop
+  run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
+  ok "$(counter)$1 restarted"
   cd ..
 }
 
 update_app() {
-  echo "Stopping ${bold}$1${normal}"
   enter_app "$1"
-  compose stop
-  ok "$1 stopped"
-  echo "Updating $1"
+  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop
+  echo "$(counter)Pulling ${bold}$1${normal} images"
   compose pull
-  ok "Images up to date. Starting all services."
-  compose up -d
-  ok "$1 updated and running"
+  run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
+  ok "$(counter)$1 updated and running"
   cd ..
 }
 
 backup_app() {
-  echo "Stopping ${bold}$1${normal}"
   enter_app "$1"
-  compose stop
-  ok "$1 stopped"
-  echo "Backing up $1"
+  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop
   mkdir -p "$TARGET"
-  tar -cjf "${TARGET}${1}$(date '+%Y-%m-%d').tar.bz2" "${DOCKER_VOLUMES}${1}"
-  ok "$1 is backed up"
-  echo "Updating $1"
+  run_step "$(counter)Backing up ${bold}$1${normal}" tar -cjf "${TARGET}${1}$(date '+%Y-%m-%d').tar.bz2" "${DOCKER_VOLUMES}${1}"
+  echo "$(counter)Pulling ${bold}$1${normal} images"
   compose pull
-  ok "Images up to date. Starting all services."
-  compose up -d
-  ok "$1 backed up, updated and running"
+  run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
+  ok "$(counter)$1 backed up, updated and running"
   cd ..
 }
 
 usage() {
   cat <<EOF
-${bold}DockerDance${normal} - bulk manage docker compose apps
+${bold}${cyan}DockerDance${normal} - bulk manage docker compose apps
 
 Usage: ./manage.sh <command> [app ...]
 
@@ -173,6 +251,9 @@ run_command() {
   menu_command=$1
   # shellcheck disable=SC2086 # Apps is an intentionally space-separated list
   set -- $Apps
+  RUN_START=$(date +%s)
+  APP_TOTAL=$#
+  APP_NUM=0
   case "$menu_command" in
     'backup' )
       checkDefault
@@ -180,9 +261,10 @@ run_command() {
       actioninfo "${bold}Backing up${normal} apps including:"
       list_apps "$@"
       for app in "$@"; do
+        APP_NUM=$((APP_NUM + 1))
         backup_app "$app"
       done
-      success "Backing up completed"
+      success "Backing up completed in $(elapsed)"
       ;;
     'restore' )
       echo "Coming soon:"
@@ -210,9 +292,10 @@ run_command() {
       actioninfo "${bold}Updating all services.${normal}"
       list_apps "$@"
       for app in "$@"; do
+        APP_NUM=$((APP_NUM + 1))
         update_app "$app"
       done
-      success "Services updated. Give them a moment to warm up."
+      success "Services updated in $(elapsed). Give them a moment to warm up."
       ;;
     'stop' )
       checkDefault
@@ -220,9 +303,10 @@ run_command() {
       actioninfo "${bold}Stopping${normal} all services:"
       list_apps "$@"
       for app in "$@"; do
+        APP_NUM=$((APP_NUM + 1))
         stop_app "$app"
       done
-      success "Services stopped"
+      success "Services stopped in $(elapsed)"
       ;;
     'start' )
       checkDefault
@@ -230,18 +314,20 @@ run_command() {
       actioninfo "${bold}Starting${normal} all services"
       list_apps "$@"
       for app in "$@"; do
+        APP_NUM=$((APP_NUM + 1))
         start_app "$app"
       done
-      success "Services started. Give them a moment to warm up."
+      success "Services started in $(elapsed). Give them a moment to warm up."
       ;;
     'restart' )
       checkDefault
       require_docker
       actioninfo "${bold}Restarting${normal} all services"
       for app in "$@"; do
+        APP_NUM=$((APP_NUM + 1))
         restart_app "$app"
       done
-      success "Services restarted. Give them a moment to warm up."
+      success "Services restarted in $(elapsed). Give them a moment to warm up."
       ;;
     'version' )
       checkDefault
@@ -317,7 +403,7 @@ interactive() {
   ALL_APPS=$Apps
   while :; do
     echo ""
-    echo "${bold}DockerDance${normal} - what would you like to do?"
+    echo "${bold}${cyan}DockerDance${normal} - what would you like to do?"
     echo "  1) start    2) stop     3) restart"
     echo "  4) update   5) backup   6) logs"
     echo "  7) version  8) running  q) quit"
