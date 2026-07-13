@@ -72,7 +72,12 @@ Two options work with any command (before or after it):
 ### Interactive menu
 `./manage.sh`
 
-Running the script with no arguments on a terminal opens a simple menu: pick a command, then pick the app(s). You can select **more than one app** — with [fzf](https://github.com/junegunn/fzf) press `TAB` to multi-select (with a live container-status preview pane); in the plain numbered fallback enter a space/comma-separated list like `1 3`, or `0` for all. No extra dependencies required. Cron and piped usage are unaffected: without a terminal the script prints usage instead of waiting for input.
+Running the script with no arguments on a terminal opens a menu: pick a command (including `status`, `doctor`, `system-update` and `update-self`), then pick the app(s).
+
+- **With [fzf](https://github.com/junegunn/fzf)** the whole menu is navigable with the **arrow keys** and type-to-filter. On the command list, `Enter` selects and `Esc` quits. On the app list, `TAB` multi-selects (with a live container-status preview pane), `Enter` confirms and `Esc` goes back to the command list.
+- **Without fzf** a numbered menu is shown — type the number *or* the command name; on the app list enter a space/comma-separated list like `1 3` (or `0` for all), and `b` goes back. (Arrow-key navigation needs fzf; a `brew install fzf` / `apt install fzf` is all it takes.)
+
+No extra dependencies are required either way. Cron and piped usage are unaffected: without a terminal the script prints usage instead of waiting for input.
 
 Colours and spinners appear only on capable terminals and respect [`NO_COLOR`](https://no-color.org). Only one state-changing run is allowed at a time per folder (a lock protects a cron backup from overlapping a manual update). Tab-completion is available for bash, zsh and fish in [contrib/](contrib/).
 
