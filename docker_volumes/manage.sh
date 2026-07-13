@@ -282,6 +282,15 @@ leave_app() {
   cd "$APP_RETURN_DIR"
 }
 
+#Is $1 one of the space-separated words in $2?
+in_list() {
+  # shellcheck disable=SC2086 # $2 is an intentionally space-separated list
+  for il_x in $2; do
+    [ "$il_x" = "$1" ] && return 0
+  done
+  return 1
+}
+
 #Progress counter shown when more than one app is being processed
 APP_NUM="" APP_TOTAL=""
 counter() {
@@ -333,6 +342,84 @@ pull_images() {
   else
     compose pull --quiet
   fi
+}
+
+#How many image pulls to run at once (nala-style). 1 makes pulls sequential.
+PARALLEL_PULLS="${PARALLEL_PULLS:-3}"
+
+#Pull one app's images quietly - used by the parallel orchestrator, where
+#interleaved progress bars would be unreadable.
+_pull_one() {
+  enter_app "$1"
+  compose pull --quiet
+}
+
+#Launch pulls in batches of PARALLEL_PULLS, recording any that fail.
+_pull_orchestrate() {
+  while [ $# -gt 0 ]; do
+    po_pids=""
+    po_c=0
+    while [ $# -gt 0 ] && [ "$po_c" -lt "$PARALLEL_PULLS" ]; do
+      po_app=$1
+      shift
+      po_c=$((po_c + 1))
+      ( _pull_one "$po_app" ) >"$pp_dir/$po_app.log" 2>&1 &
+      po_pid=$!
+      po_pids="$po_pids $po_pid"
+      echo "$po_app" >"$pp_dir/pid.$po_pid"
+    done
+    # shellcheck disable=SC2086 # pids are numeric, space-separated on purpose
+    for po_pid in $po_pids; do
+      if ! wait "$po_pid"; then
+        cat "$pp_dir/pid.$po_pid" >>"$pp_dir/failed"
+      fi
+    done
+  done
+}
+
+#Pull images for several apps concurrently. Sets PULL_FAILED to the apps whose
+#pull failed; the caller leaves those on their current image and skips them.
+parallel_pull() {
+  PULL_FAILED=""
+  [ $# -eq 0 ] && return 0
+  if [ -n "${DRY_RUN:-}" ]; then
+    for pp_app in "$@"; do
+      echo "${dim}[dry-run]${normal} would pull ${bold}$pp_app${normal} images"
+    done
+    return 0
+  fi
+  pp_total=$#
+  pp_dir=$(mktemp -d "${TMPDIR:-/tmp}/dockerdance-pull.XXXXXX" 2>/dev/null) || { pp_dir="${TMPDIR:-/tmp}/dockerdance-pull.$$"; mkdir -p "$pp_dir"; }
+  : >"$pp_dir/failed"
+  #Run the orchestrator in the background so one spinner can cover the phase.
+  ( _pull_orchestrate "$@" ) >"$pp_dir/orch.log" 2>&1 &
+  pp_orch=$!
+  pp_label="Pulling images for $pp_total app(s), up to $PARALLEL_PULLS at a time"
+  if [ -n "$SPINNER" ]; then
+    tput civis 2>/dev/null || true
+    while kill -0 "$pp_orch" 2>/dev/null; do
+      # shellcheck disable=SC2086 # frames are an intentionally space-separated list
+      for pp_frame in $SPINNER_FRAMES; do
+        kill -0 "$pp_orch" 2>/dev/null || break
+        printf '\r%s%s%s %s' "$cyan" "$pp_frame" "$normal" "$pp_label"
+        sleep 0.1 2>/dev/null || sleep 1
+      done
+    done
+    printf '\r'
+    tput el 2>/dev/null || printf '%-79s\r' ''
+    tput cnorm 2>/dev/null || true
+    wait "$pp_orch" || true
+  else
+    echo "$pp_label..."
+    wait "$pp_orch" || true
+  fi
+  PULL_FAILED=$(tr '\n' ' ' <"$pp_dir/failed")
+  PULL_FAILED=${PULL_FAILED% }
+  for pp_app in $PULL_FAILED; do
+    warn "Pull failed for $pp_app - leaving it on its current image"
+    [ -s "$pp_dir/$pp_app.log" ] && sed 's/^/    /' "$pp_dir/$pp_app.log" >&2
+  done
+  rm -rf "$pp_dir"
 }
 
 #Wait for an app's containers to come up healthy after starting. Containers
@@ -438,11 +525,11 @@ restart_app() {
   leave_app
 }
 
+#Images are pulled up front (in parallel) by the caller, so this just cycles
+#the app onto the new image with minimal downtime.
 update_app() {
   app_start=$(date +%s)
   enter_app "$1"
-  #Pull while the app is still running so downtime is only the stop/start window
-  pull_images "$1"
   run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT"
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
   wait_healthy "$1" "updated and running"
@@ -450,11 +537,11 @@ update_app() {
   leave_app
 }
 
+#Images are pulled up front (in parallel) by the caller; this stops, archives
+#and starts the app back on the new image.
 backup_app() {
   app_start=$(date +%s)
   enter_app "$1"
-  #Pull while the app is still running so downtime is only the stop/backup/start window
-  pull_images "$1"
   run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT"
   mkdir -p "$TARGET"
   archive="${TARGET}${1}$(date '+%Y-%m-%d').tar.bz2"
@@ -721,8 +808,15 @@ run_command() {
       NOTIFY_CONTEXT="Backup of $*"
       actioninfo "${bold}Backing up${normal} apps including:"
       list_apps "$@"
+      parallel_pull "$@"
       for app in "$@"; do
         APP_NUM=$((APP_NUM + 1))
+        if in_list "$app" "$PULL_FAILED"; then
+          app_start=$(date +%s)
+          warn "$(counter)Skipping $app (its pull failed)"
+          record "$app" "skipped"
+          continue
+        fi
         backup_app "$app"
       done
       print_summary
@@ -768,12 +862,19 @@ run_command() {
       NOTIFY_CONTEXT="Update of $*"
       actioninfo "${bold}Updating all services.${normal}"
       list_apps "$@"
+      parallel_pull "$@"
       for app in "$@"; do
         APP_NUM=$((APP_NUM + 1))
+        if in_list "$app" "$PULL_FAILED"; then
+          app_start=$(date +%s)
+          warn "$(counter)Skipping $app (its pull failed)"
+          record "$app" "skipped"
+          continue
+        fi
         update_app "$app"
       done
       print_summary
-      success "Services updated in $(elapsed). Give them a moment to warm up."
+      success "Services updated in $(elapsed)."
       notify "Update of $* completed in $(elapsed)"
       NOTIFY_CONTEXT=""
       ;;
