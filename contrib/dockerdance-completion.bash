@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Bash completion for DockerDance's manage.sh
-# Install: source this file from ~/.bashrc, e.g.
-#   echo "source $HOME/docker_volumes/contrib/dockerdance-completion.bash" >> ~/.bashrc
+# Install: source this file from ~/.bashrc, pointing at wherever you placed it, e.g.
+#   echo "source /path/to/DockerDance/contrib/dockerdance-completion.bash" >> ~/.bashrc
 # Completes commands first, then app folder names in the current directory.
 
 _dockerdance() {

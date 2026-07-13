@@ -21,8 +21,9 @@ This provides an easier way to update, restart and backup apps/services.
 
 ### Prerequisites
 - A Unix-like operating system: macOS, Linux, BSD. On Windows: WSL2 is preferred, but cygwin or msys also mostly work.
-- Docker, either with old compose or updated compose plugin
-- Each service contained in a folder within a `docker_volumes` folder with its own `docker-compose.yml`
+- Docker, either with old compose (`docker-compose`) or the updated compose plugin (`docker compose`) — the script detects which you have
+- Each service contained in a folder within a `docker_volumes` folder, with its own compose file (`docker-compose.yml`/`.yaml` or `compose.yml`/`.yaml`). The script finds these folders for you (see `Apps="auto"` below)
+- Optional: [fzf](https://github.com/junegunn/fzf) for a fuzzy app-picker in the interactive menu — the menu works without it
 
 ### Basic Usage
 The folders have been setup for use on a new server to make use of the script's structure.
@@ -91,8 +92,7 @@ Stops all the apps, then starts them up again.
 
 ### Backup
 `./manage.sh backup`
-At the moment the script is limited to backing up files in each directory.
-Its function acts as an all in one for my use; It stops the container, backs up, updates and starts.
+An all-in-one per app: it pulls the latest images **while the app is still running**, stops it gracefully, tars its folder into the `backup` folder, then starts it back up on the new images. Archives are written with `chmod 600` (they contain your `.env` secrets) and store paths relative to `docker_volumes`, so a `restore` is portable. Running twice in one day won't clobber the earlier archive — the second gets a `_HHMMSS` suffix. Set `BACKUP_KEEP=N` to keep only the newest N archives per app.
 
 ### Restore
 `./manage.sh restore linkace`
@@ -118,7 +118,9 @@ Updates the script itself to the latest [GitHub release](https://github.com/Adam
 
 
 ## Environment
-This script is to be used in a linux system as a user with priveleges to modify files. (i.e. root or if your user is part of a group - to mitigate issues backing up files such as databases.)
+This script is meant to run on a Unix-like system as a user with privileges to modify the app files — i.e. root, or a user whose group can read the volume data — so that backing up database files created by root doesn't fail with a permission error.
+
+> **A note on secrets and safety.** App folders usually contain a `.env` with credentials, so the backup archives do too — they're written `chmod 600` (owner-only), and the `backup` folder inherits the permissions of the root-owned `docker_volumes` tree. `restore` never deletes your current data: it moves it aside to `<app>.pre-restore.<timestamp>` and asks for confirmation before extracting. If you sync backups off-box (see below), treat that copy as sensitive too.
 
 ### Folder structure
 The default path is set to `~/docker_volumes` (userhome/docker_volumes).
@@ -143,8 +145,7 @@ userfolder
 ```
 
 ### Backups
-When backups above are completed, they are placed in a backup folder with the name of the service and the date appended on the end.
-The date is designed without a timestamp to be run once a day/week/month. If time is critical, then the `tar` filename can be adjusted for your use.
+When a backup completes, the archive is placed in the `backup` folder named `<service><date>.tar.bz2`. The date is deliberately day-resolution so a daily/weekly/monthly cron run produces one archive per period. If you back up more than once in a day, the extra runs get a `_HHMMSS` suffix instead of overwriting the first. Set `BACKUP_KEEP=N` to prune automatically to the newest N archives per app after each run.
 
 ```
 userfolder
@@ -177,24 +178,33 @@ I have another system that connects and executes an [rsync](https://download.sam
 - the backup folder is created automatically if it doesn't exist yet.
 
 ## Things to improve
-- Code could be refactored as there are multiple repeating elements
-- Restoring
-- More with backups to show processes uploading to external servers.
-- Ability to define target as a remote server or path with more storage.
+- Ability to define the backup target as a remote server or path with more storage
+- A `status` / dashboard view showing every app's state at a glance
+- Health-aware start (wait until containers report healthy before moving on)
+
+See the [CHANGELOG](CHANGELOG.md) for what's landed recently.
 
 ### Cron
-TBC - useful to run on a schedule to update, backup etc.
+The script gives plain, un-coloured output and needs no terminal when run non-interactively, so it drops straight into cron. For example, back up every discovered app nightly at 3am and log it:
+
+`0 3 * * * cd /home/systemadmin/docker_volumes && ./manage.sh backup >> /var/log/dockerdance.log 2>&1`
+
+Set `NOTIFY_WEBHOOK` (easiest in `manage.conf`) to get a Slack/Discord ping when a scheduled run finishes or fails. A lock stops a cron run from overlapping a manual one on the same folder, so you won't get two `stop`/`start` cycles fighting each other.
 
 ### Adding script as an alias
 Depending on your system, you could use something like the below to add the script to your path to just type `appmanage` or whatever command you'd like to nickname it to.
 
 `echo "alias appmanage='$HOME/docker_volumes/manage.sh'" >> ~/.bashrc`
 
+### Tab completion
+A bash completion is included in [contrib/dockerdance-completion.bash](contrib/dockerdance-completion.bash). Source it from your shell startup, pointing at wherever you put the file:
+
+`echo "source /path/to/DockerDance/contrib/dockerdance-completion.bash" >> ~/.bashrc`
+
+It completes the commands first, then app folder names.
+
 ### example folder
-The example folder should be deleted once variables are configured.
-When executing `./manage.sh start` nothing will show as it starts the process detached with `-d`.
-The compose file pulls alpine to show a version if you run `docker compose up`. Helpful for troubleshooting.
-There is a 'test' logic in the script to make sure you change the example variable under `Apps`
+The repo ships an `example` folder with a tiny alpine compose file. Because the default `Apps="auto"` discovers any folder containing a compose file, a fresh clone treats `example` as an app — handy for a first `./manage.sh start` to confirm everything works (it runs detached with `-d`, so nothing prints; `docker compose up` in the folder shows the test message). Delete the folder once you've added your own apps. If you instead pin `Apps="example"` explicitly, the script refuses to run until you change it.
 
 ## License
 

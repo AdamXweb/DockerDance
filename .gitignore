@@ -1,0 +1,6 @@
+# Local configuration - may contain a webhook URL or host-specific paths
+docker_volumes/manage.conf
+
+# Backup archives and restore leftovers
+docker_volumes/backup/*.tar.bz2
+docker_volumes/*.pre-restore.*

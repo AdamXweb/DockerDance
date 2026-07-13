@@ -1,0 +1,34 @@
+# DockerDance configuration - copy to "manage.conf" next to manage.sh and edit.
+#
+#   cp manage.conf.example manage.conf
+#
+# manage.conf is sourced by manage.sh at startup, so it's plain shell:
+# VAR="value", one per line, '#' starts a comment. Keeping your settings here
+# (rather than editing manage.sh) means they survive `./manage.sh update-self`.
+# Everything below is optional and shown with its default.
+
+# Which apps to manage.
+#   "auto"  - discover every folder here that has a compose file (the default)
+#   a list  - pin the exact set and order, e.g. "linkace .n8n uptime-kuma"
+#Apps="auto"
+
+# The user whose home holds docker_volumes. Only used to build the default
+# DOCKER_VOLUMES path below; ignored if you set DOCKER_VOLUMES directly.
+#USERNAME="systemadmin"
+
+# Absolute path to the docker_volumes folder (note the trailing slash).
+# Defaults to /home/$USERNAME/docker_volumes/. On macOS, for example:
+#DOCKER_VOLUMES="/Users/yourname/docker_volumes/"
+
+# Seconds to wait for a container to stop gracefully before docker forces it.
+# Raise it for databases that take a while to flush to disk.
+#STOP_TIMEOUT="30"
+
+# Keep only the newest N backup archives per app (older ones are pruned after
+# each backup). Leave unset to keep every archive.
+#BACKUP_KEEP="7"
+
+# Webhook pinged when update/backup/restore finishes or fails. The payload
+# carries both a Slack "text" and a Discord "content" field, so a Slack or
+# Discord incoming-webhook URL works as-is.
+#NOTIFY_WEBHOOK="https://hooks.slack.com/services/XXXX/YYYY/ZZZZ"
