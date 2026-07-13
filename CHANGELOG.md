@@ -30,8 +30,11 @@ overhaul. `./manage.sh update-self` will offer this to anyone on v0.1.0.
 - **`--dry-run`** previews any command without touching anything, **`-y`/`--yes`**
   skips confirmations (and lets `restore` run non-interactively), and **update**
   now confirms before recreating containers on a terminal. **`--no-color`** flag.
-- **Multi-app selection in the menu.** fzf `TAB` multi-select, or a
-  space/comma list in the numbered fallback.
+- **Interactive menu upgrades.** The command list is now fzf-driven when fzf
+  is installed (arrow-key navigation, type-to-filter, Esc to quit/go back) and
+  includes `system-update` and `update-self`; the numbered fallback also
+  accepts a typed command name and a `b` to go back. Multi-app selection via
+  fzf `TAB` or a space/comma list.
 - **zsh and fish completions** alongside the bash one.
 - **Zero-config app discovery.** `Apps="auto"` (the new default) manages every
   folder that contains a compose file (`docker-compose.yml`/`.yaml` or

@@ -1213,6 +1213,52 @@ status_dot() {
   fi
 }
 
+#Commands offered in the interactive menu, and the ones that don't take an app.
+MENU_COMMANDS="start stop restart update backup restore status logs version running system-update update-self doctor"
+NO_APP_COMMANDS="status running doctor system-update update-self"
+
+#Pick a command for the interactive menu. Sets PICKED_COMMAND ("" = reprompt,
+#"quit" = leave). With fzf you get arrow-key navigation and type-to-filter and
+#Esc to quit; otherwise a numbered menu that also accepts a typed command name.
+pick_command() {
+  PICKED_COMMAND=""
+  if command -v fzf >/dev/null 2>&1; then
+    # shellcheck disable=SC2086 # the command list is intentionally word-split
+    PICKED_COMMAND=$(printf '%s\n' $MENU_COMMANDS quit \
+      | fzf --prompt="DockerDance> " --reverse --height="~65%" \
+            --header="up/down move | type to filter | Enter select | Esc quit") \
+      || PICKED_COMMAND="quit"
+    return 0
+  fi
+  echo ""
+  echo "${bold}${cyan}DockerDance${normal} ${dim}v$VERSION${normal} - what would you like to do?"
+  echo "   1) start     2) stop      3) restart       4) update"
+  echo "   5) backup    6) restore   7) status        8) logs"
+  echo "   9) version  10) running  11) doctor       12) system-update"
+  echo "  13) update-self                             q) quit"
+  echo "  ${dim}tip: install fzf for arrow-key navigation and filtering${normal}"
+  printf "> "
+  read -r choice || { PICKED_COMMAND="quit"; return 0; }
+  case "$choice" in
+    1 ) PICKED_COMMAND="start" ;;
+    2 ) PICKED_COMMAND="stop" ;;
+    3 ) PICKED_COMMAND="restart" ;;
+    4 ) PICKED_COMMAND="update" ;;
+    5 ) PICKED_COMMAND="backup" ;;
+    6 ) PICKED_COMMAND="restore" ;;
+    7 ) PICKED_COMMAND="status" ;;
+    8 ) PICKED_COMMAND="logs" ;;
+    9 ) PICKED_COMMAND="version" ;;
+    10 ) PICKED_COMMAND="running" ;;
+    11 ) PICKED_COMMAND="doctor" ;;
+    12 ) PICKED_COMMAND="system-update" ;;
+    13 ) PICKED_COMMAND="update-self" ;;
+    q | Q | quit | exit ) PICKED_COMMAND="quit" ;;
+    start | stop | restart | update | backup | restore | status | logs | version | running | doctor | system-update | update-self ) PICKED_COMMAND="$choice" ;;
+    * ) echo "Not a valid choice." ;;
+  esac
+}
+
 pick_app() {
   #Sets PICKED_APPS to a space-separated list of chosen apps, or "" for all
   #apps. Returns 1 if the user cancelled or picked nothing valid.
@@ -1220,7 +1266,7 @@ pick_app() {
   if command -v fzf >/dev/null 2>&1; then
     #The preview pane shows live container status for the highlighted app
     fzf_preview='if [ {} = "all apps" ]; then docker ps; else (cd {} && '"$DOCKER_COMPOSE_COMMAND"' ps) 2>/dev/null || echo "(no status)"; fi'
-    pa_sel=$(printf '%s\n' "all apps" "$@" | fzf --multi --prompt="apps (TAB to multi-select)> " --preview "$fzf_preview") || return 1
+    pa_sel=$(printf '%s\n' "all apps" "$@" | fzf --multi --prompt="apps> " --header="TAB multi-select | Enter confirm | Esc to go back" --preview "$fzf_preview") || return 1
     #'all apps' anywhere in the selection means everything
     if printf '%s\n' "$pa_sel" | grep -qx "all apps"; then
       PICKED_APPS=""
@@ -1237,8 +1283,12 @@ pick_app() {
     n=$((n + 1))
     echo "  $n) $(status_dot "$app") $app"
   done
-  printf "Select app(s) [0-%s, space/comma separated]: " "$n"
+  echo "  b) back"
+  printf "Select app(s) [0-%s, space/comma separated, or b to go back]: " "$n"
   read -r selection || return 1
+  case "$selection" in
+    b | B | back ) return 1 ;;
+  esac
   selection=$(printf '%s' "$selection" | tr ',' ' ')
   pa_out=""
   # shellcheck disable=SC2086 # selection is an intentionally space-separated list
@@ -1276,38 +1326,23 @@ interactive() {
   maybe_discover_apps
   ALL_APPS=$Apps
   while :; do
-    echo ""
-    echo "${bold}${cyan}DockerDance${normal} ${dim}v$VERSION${normal} - what would you like to do?"
-    echo "  1) start    2) stop     3) restart"
-    echo "  4) update   5) backup   6) restore"
-    echo "  7) status   8) logs     9) version"
-    echo "  r) running  d) doctor   q) quit"
-    printf "> "
-    read -r choice || break
-    case "$choice" in
-      1 ) choice="start" ;;
-      2 ) choice="stop" ;;
-      3 ) choice="restart" ;;
-      4 ) choice="update" ;;
-      5 ) choice="backup" ;;
-      6 ) choice="restore" ;;
-      7 ) choice="status" ;;
-      8 ) choice="logs" ;;
-      9 ) choice="version" ;;
-      r | R | running ) choice="running" ;;
-      d | D | doctor ) choice="doctor" ;;
-      q | Q | quit | exit ) break ;;
-      * ) echo "Not a valid choice."; continue ;;
-    esac
+    pick_command
+    choice=$PICKED_COMMAND
+    [ -z "$choice" ] && continue
+    [ "$choice" = "quit" ] && break
     Apps=$ALL_APPS
-    #status/running/doctor act on everything (or nothing), so skip the picker
-    if [ "$choice" != "running" ] && [ "$choice" != "status" ] && [ "$choice" != "doctor" ]; then
-      # shellcheck disable=SC2086 # Apps is an intentionally space-separated list
-      pick_app $Apps || continue
-      if [ -n "$PICKED_APPS" ]; then
-        Apps=$PICKED_APPS
-      fi
-    fi
+    #Commands that act on everything (or nothing) skip the app picker; the rest
+    #let you pick app(s), where Esc (fzf) or 'b' (numbered) goes back to here.
+    case " $NO_APP_COMMANDS " in
+      *" $choice "* ) : ;;
+      * )
+        # shellcheck disable=SC2086 # Apps is an intentionally space-separated list
+        pick_app $Apps || continue
+        if [ -n "$PICKED_APPS" ]; then
+          Apps=$PICKED_APPS
+        fi
+        ;;
+    esac
     #Run in a subshell so one failed command reports and returns to the menu
     #instead of ending the whole session under set -e
     set +e
