@@ -6,8 +6,11 @@ VERSION="0.2.0"
 SELF_REPO="${DOCKERDANCE_REPO:-AdamXweb/DockerDance}"
 
 #Set these variables!
-#Apps to backup (according to the folder name). Add each one with a space in between e.g. "vaultwarden uptime-kuma"
-Apps="example"
+#Apps to manage. "auto" (the default) discovers every folder here that holds a
+#compose file (docker-compose.yml/.yaml or compose.yml/.yaml, or one folder
+#deeper), skipping backup/ and *.pre-restore.* folders. Or list folder names
+#with a space in between e.g. "vaultwarden uptime-kuma" to pin the set/order.
+Apps="auto"
 USERNAME="systemadmin"
 
 #Optional config file: put Apps/USERNAME (plus DOCKER_VOLUMES, STOP_TIMEOUT,
@@ -194,7 +197,45 @@ checkDefault() {
     return 0
   fi
   if [ "$Apps" = "example" ]; then
-    error "Please change the default 'Apps' variable to include your apps (or pass app names after the command)."
+    error "Please change the 'Apps' variable: list your apps, or set Apps=\"auto\" to manage every folder here with a compose file."
+    exit 1
+  fi
+}
+
+#Apps="auto": build the app list from the folders actually present
+discover_apps() {
+  found=""
+  #the extra patterns pick up hidden apps like .n8n while skipping . and ..
+  for d in */ .[!.]*/ ..?*/; do
+    [ -d "$d" ] || continue
+    d=${d%/}
+    case "$d" in
+      backup | *.pre-restore.* ) continue ;;
+    esac
+    if has_compose_file "$d"; then
+      found="$found $d"
+      continue
+    fi
+    for sub in "$d"/*/; do
+      [ -d "$sub" ] || continue
+      if has_compose_file "$sub"; then
+        found="$found $d"
+        break
+      fi
+    done
+  done
+  Apps=${found# }
+}
+
+maybe_discover_apps() {
+  [ "$APPS_OVERRIDDEN" = "1" ] && return 0
+  case "$Apps" in
+    'auto' | '' ) ;;
+    * ) return 0 ;;
+  esac
+  discover_apps
+  if [ -z "$Apps" ]; then
+    error "Apps=\"auto\" found no folders with a compose file in $(pwd). Run this from your docker_volumes folder."
     exit 1
   fi
 }
@@ -516,13 +557,17 @@ Commands:
   update-self  Update this script to the latest GitHub release
   help         Show this help (--version shows the script version)
 
-Commands run against every app in the Apps variable. Pass one or more
+Commands run against every app in the Apps variable. The default, "auto",
+discovers every folder here that contains a compose file. Pass one or more
 folder names to target specific apps instead, e.g. ./manage.sh restart linkace
 EOF
 }
 
 run_command() {
   menu_command=$1
+  case "$menu_command" in
+    'backup' | 'restore' | 'update' | 'stop' | 'start' | 'restart' | 'logs' | 'version' ) maybe_discover_apps ;;
+  esac
   # shellcheck disable=SC2086 # Apps is an intentionally space-separated list
   set -- $Apps
   RUN_START=$(date +%s)
@@ -715,6 +760,7 @@ pick_app() {
 interactive() {
   checkDefault
   require_docker
+  maybe_discover_apps
   ALL_APPS=$Apps
   while :; do
     echo ""

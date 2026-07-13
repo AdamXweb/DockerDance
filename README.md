@@ -44,7 +44,8 @@ Docker management can be used as the script itself by downloading with a method 
 
 
 #### Customise variables
-`Apps="example"` - Change to the exact wording of each folder within `docker_volumes` e.g. `Apps="linkace .n8n dashy"`
+`Apps="auto"` (the default) - the script discovers every folder within `docker_volumes` that contains a compose file (`docker-compose.yml`/`.yaml` or `compose.yml`/`.yaml`, or one folder deeper) and manages all of them, in alphabetical order. The `backup` folder and `*.pre-restore.*` folders are skipped. Just drop `manage.sh` into your `docker_volumes` folder and it works.
+To pin the set or the order instead, list the folders explicitly e.g. `Apps="linkace .n8n dashy"`
 `USERNAME="systemadmin"` - The user folder that you store the `docker_volumes` in. If you're stuck, type `pwd` to find the path you're in, or `whoami` to get the user name.
 `DOCKER_VOLUMES` defaults to `/home/$USERNAME/docker_volumes/` and can be overwritten in the script, or from the environment without editing anything — handy for MacOS: `DOCKER_VOLUMES="/Users/UserName/docker_volumes/" ./manage.sh start`
 `STOP_TIMEOUT` (default `30`) - seconds to wait for containers to shut down gracefully before docker gives up. Raise it for databases that take a while to flush.
@@ -57,7 +58,7 @@ Instead of editing the script, all of the above can live in a `manage.conf` file
 
 ## Commands
 There are a few commands you can use with the script.
-Side note, the script executes commands in the order they are listed as e.g. `Apps="1 2 3"` iterates in that order
+Side note, the script executes commands in the order they are listed as e.g. `Apps="1 2 3"` iterates in that order (with `Apps="auto"` the discovered folders run alphabetically)
 
 First, make sure you are in the `docker_volumes` folder, and execute any of the commands below.
 
