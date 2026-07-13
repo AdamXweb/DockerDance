@@ -335,11 +335,85 @@ pull_images() {
   fi
 }
 
+#Wait for an app's containers to come up healthy after starting. Containers
+#with a healthcheck must report 'healthy'; those without just need to be
+#running. Best-effort and never fails the run - it gives up after
+#HEALTH_TIMEOUT seconds (set HEALTH_TIMEOUT=0 to skip the wait entirely).
+#Call from inside the app dir. $2 is the verb for the result line, or "" to
+#stay quiet unless something is wrong. Uses `docker inspect` rather than
+#parsing `compose ps --format json`, whose shape varies across versions.
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-60}"
+wait_healthy() {
+  wh_app=$1
+  wh_verb=${2:-}
+  [ -n "${DRY_RUN:-}" ] && return 0
+  if ! [ "${HEALTH_TIMEOUT:-0}" -gt 0 ] 2>/dev/null; then
+    [ -n "$wh_verb" ] && ok "$(counter)$wh_app $wh_verb"
+    return 0
+  fi
+  wh_deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
+  wh_label="$(counter)Waiting for ${bold}$wh_app${normal} to be healthy"
+  [ -n "$SPINNER" ] && { tput civis 2>/dev/null || true; }
+  wh_rc=0
+  wh_result=""
+  wh_hchecks=0
+  while :; do
+    wh_ids=$(compose ps -q 2>/dev/null)
+    if [ -z "$wh_ids" ]; then wh_rc=1; wh_result="no containers came up"; break; fi
+    wh_total=0; wh_up=0; wh_unhealthy=0; wh_starting=0; wh_hchecks=0
+    # shellcheck disable=SC2086 # ids are one-per-line with no spaces
+    for wh_id in $wh_ids; do
+      wh_total=$((wh_total + 1))
+      wh_st=$(docker inspect -f '{{.State.Status}}' "$wh_id" 2>/dev/null)
+      [ "$wh_st" = "running" ] && wh_up=$((wh_up + 1))
+      wh_h=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$wh_id" 2>/dev/null)
+      case "$wh_h" in
+        healthy )   wh_hchecks=$((wh_hchecks + 1)) ;;
+        unhealthy ) wh_hchecks=$((wh_hchecks + 1)); wh_unhealthy=$((wh_unhealthy + 1)) ;;
+        starting )  wh_hchecks=$((wh_hchecks + 1)); wh_starting=$((wh_starting + 1)) ;;
+      esac
+    done
+    if [ "$wh_unhealthy" -gt 0 ]; then wh_rc=1; wh_result="a container is unhealthy"; break; fi
+    if [ "$wh_up" -eq "$wh_total" ] && [ "$wh_starting" -eq 0 ]; then wh_rc=0; break; fi
+    if [ "$(date +%s)" -ge "$wh_deadline" ]; then wh_rc=1; wh_result="still not healthy after ${HEALTH_TIMEOUT}s"; break; fi
+    if [ -n "$SPINNER" ]; then
+      # shellcheck disable=SC2086 # frames are an intentionally space-separated list
+      for wh_frame in $SPINNER_FRAMES; do
+        printf '\r%s%s%s %s' "$cyan" "$wh_frame" "$normal" "$wh_label"
+        sleep 0.1 2>/dev/null || sleep 1
+      done
+    else
+      sleep 2
+    fi
+  done
+  if [ -n "$SPINNER" ]; then
+    printf '\r'
+    tput el 2>/dev/null || printf '%-79s\r' ''
+    tput cnorm 2>/dev/null || true
+  fi
+  if [ "$wh_rc" -eq 0 ]; then
+    if [ -n "$wh_verb" ]; then
+      if [ "$wh_hchecks" -gt 0 ]; then
+        ok "$(counter)$wh_app $wh_verb, healthy"
+      else
+        ok "$(counter)$wh_app $wh_verb"
+      fi
+    fi
+  else
+    if [ -n "$wh_verb" ]; then
+      warn "$(counter)$wh_app $wh_verb, but $wh_result"
+    else
+      warn "$(counter)$wh_app $wh_result"
+    fi
+  fi
+  return 0
+}
+
 start_app() {
   app_start=$(date +%s)
   enter_app "$1"
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
-  ok "$(counter)$1 started"
+  wait_healthy "$1" "started"
   record "$1" "started"
   leave_app
 }
@@ -359,7 +433,7 @@ restart_app() {
   enter_app "$1"
   run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT"
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
-  ok "$(counter)$1 restarted"
+  wait_healthy "$1" "restarted"
   record "$1" "restarted"
   leave_app
 }
@@ -371,7 +445,7 @@ update_app() {
   pull_images "$1"
   run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT"
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
-  ok "$(counter)$1 updated and running"
+  wait_healthy "$1" "updated and running"
   record "$1" "updated"
   leave_app
 }
@@ -400,7 +474,7 @@ backup_app() {
     done
   fi
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
-  ok "$(counter)$1 backed up, updated and running"
+  wait_healthy "$1" "backed up, updated and running"
   record "$1" "backed up"
   leave_app
 }
@@ -510,6 +584,7 @@ restore_app() {
 
   enter_app "$1"
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
+  wait_healthy "$1" ""
   leave_app
   ok "$(counter)$1 restored. Previous data kept at ${aside##*/} - delete it once you're happy"
   record "$1" "restored"
