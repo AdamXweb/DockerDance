@@ -50,6 +50,8 @@ To pin the set or the order instead, list the folders explicitly e.g. `Apps="lin
 `USERNAME="systemadmin"` - The user folder that you store the `docker_volumes` in. If you're stuck, type `pwd` to find the path you're in, or `whoami` to get the user name.
 `DOCKER_VOLUMES` defaults to `/home/$USERNAME/docker_volumes/` and can be overwritten in the script, or from the environment without editing anything — handy for MacOS: `DOCKER_VOLUMES="/Users/UserName/docker_volumes/" ./manage.sh start`
 `STOP_TIMEOUT` (default `30`) - seconds to wait for containers to shut down gracefully before docker gives up. Raise it for databases that take a while to flush.
+`HEALTH_TIMEOUT` (default `60`) - after starting an app, seconds to wait for its containers to become healthy (or just running, if they have no healthcheck) before moving on. Set `0` to skip the wait entirely.
+`PARALLEL_PULLS` (default `3`) - how many image pulls `update`/`backup` run at once. Set `1` for the old one-at-a-time behaviour.
 `BACKUP_KEEP` (unset by default) - when set to a number, only that many most-recent backup archives are kept per app; older ones are pruned after each backup.
 
 `NOTIFY_WEBHOOK` (unset by default) - a webhook URL (Slack and Discord formats both work) that gets a message when an update, backup or restore completes or fails. Handy for cron runs. See issue [#3](https://github.com/AdamXweb/DockerDance/issues/3).
@@ -65,12 +67,17 @@ First, make sure you are in the `docker_volumes` folder, and execute any of the 
 
 Every command runs against all the apps in the `Apps` variable by default. To target one or more specific apps, add their folder names after the command, e.g. `./manage.sh restart linkace` or `./manage.sh update linkace uptime-kuma`.
 
+Two options work with any command (before or after it):
+- `--dry-run` prints exactly what would happen — which apps get pulled, stopped, backed up, started — without touching anything.
+- `-y` / `--yes` skips confirmation prompts (so `update` and `restore` can run unattended).
+- `--no-color` turns off coloured output (as does setting `NO_COLOR`).
+
 ### Interactive menu
 `./manage.sh`
 
-Running the script with no arguments on a terminal opens a simple menu: pick a command, then pick an app (or all apps). If [fzf](https://github.com/junegunn/fzf) is installed it's used to fuzzy-pick the app with a live container-status preview pane; otherwise a plain numbered menu is shown with a running/stopped dot per app — no extra dependencies required. Cron and piped usage are unaffected: without a terminal the script prints usage instead of waiting for input.
+Running the script with no arguments on a terminal opens a simple menu: pick a command, then pick the app(s). You can select **more than one app** — with [fzf](https://github.com/junegunn/fzf) press `TAB` to multi-select (with a live container-status preview pane); in the plain numbered fallback enter a space/comma-separated list like `1 3`, or `0` for all. No extra dependencies required. Cron and piped usage are unaffected: without a terminal the script prints usage instead of waiting for input.
 
-Colours and spinners appear only on capable terminals and respect [`NO_COLOR`](https://no-color.org). Only one state-changing run is allowed at a time per folder (a lock protects a cron backup from overlapping a manual update). Bash tab-completion is available: see [contrib/dockerdance-completion.bash](contrib/dockerdance-completion.bash).
+Colours and spinners appear only on capable terminals and respect [`NO_COLOR`](https://no-color.org). Only one state-changing run is allowed at a time per folder (a lock protects a cron backup from overlapping a manual update). Tab-completion is available for bash, zsh and fish in [contrib/](contrib/).
 
 ### Stop
 `./manage.sh stop`
@@ -84,7 +91,7 @@ Starts all the apps by navigating through each folder and starting with `docker 
 
 ### Update
 `./manage.sh update`
-Pulls the latest images **while each app is still running**, then stops and recreates the container — so downtime is just the stop/start window, not the whole download.
+Pulls the latest images for all target apps **in parallel** (up to `PARALLEL_PULLS` at once), then stops and recreates each container on the new image — so downtime is just the stop/start window, not the download. On a terminal it asks for confirmation first (skip with `-y`); an app whose pull fails is left running on its current image and reported. After starting, it waits for each app to report healthy (see [Health](#health) below).
 
 ### Restart
 `./manage.sh restart`
@@ -97,11 +104,23 @@ An all-in-one per app: it pulls the latest images **while the app is still runni
 ### Restore
 `./manage.sh restore linkace`
 
-Puts the newest backup archive for the app back in place: stops the app, moves the current folder aside to `<app>.pre-restore.<timestamp>` (nothing is deleted), extracts the archive, and starts the app again. Asks for confirmation and therefore needs a terminal. Pre-v0.2.0 archives (absolute paths) are detected and restored too. Closes issue [#2](https://github.com/AdamXweb/DockerDance/issues/2).
+Puts the newest backup archive for the app back in place: stops the app, moves the current folder aside to `<app>.pre-restore.<timestamp>` (nothing is deleted), extracts the archive, and starts the app again. Asks for confirmation (needs a terminal, or pass `-y`). Pre-v0.2.0 archives (absolute paths) are detected and restored too. Archives are treated as untrusted: extraction happens in an isolated staging area, any path-traversal (`..`) member is refused, and only the app's own folder is promoted — a tampered archive can't write elsewhere on disk. Closes issue [#2](https://github.com/AdamXweb/DockerDance/issues/2).
+
+### Status
+`./manage.sh status`
+
+A dashboard with one line per app: a coloured running/stopped dot, container state (`up` / `N/M up` / `stopped`), the image in use, and health. Read-only — a quick "is everything OK?" at a glance.
+
+<a name="health"></a>
+### Health
+After starting an app (via `start`, `restart`, `update`, `backup` or `restore`), the script waits for its containers to come up rather than just assuming they will. Containers with a healthcheck must report `healthy`; those without just need to be running. The result line becomes e.g. `linkace started, healthy`, or a warning if a container is unhealthy or still starting after `HEALTH_TIMEOUT` (default 60s; set `0` to skip the wait). The wait is best-effort and never fails the run.
 
 #### Minor commands
 `./manage.sh version`
 Display versions of images: `docker compose images`
+
+`./manage.sh doctor`
+A read-only environment check: docker daemon reachability, the compose flavour in use, whether `curl`/`wget`/`fzf` are present, the package manager `system-update` would use, `tar` safety, whether `DOCKER_VOLUMES` is writable, `manage.conf`, a stale lock, the effective settings and the discovered app list. Handy for first-run setup and bug reports.
 
 `./manage.sh system-update`
 Updates the host OS packages with whatever package manager the system has — `apt-get` (Debian/Ubuntu), `dnf` (Fedora/RHEL), `yum`, `pacman` (Arch), `zypper` (openSUSE), `apk` (Alpine) or `brew` (macOS) — detected in that order. Distro managers need root (it tells you to `sudo`); Homebrew refuses root and must run as your normal user. `./manage.sh apt` still works as an alias.

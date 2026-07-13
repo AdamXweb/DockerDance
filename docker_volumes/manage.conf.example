@@ -24,6 +24,13 @@
 # Raise it for databases that take a while to flush to disk.
 #STOP_TIMEOUT="30"
 
+# Seconds to wait after starting an app for its containers to become healthy
+# (or just running, if they have no healthcheck). Set 0 to skip the wait.
+#HEALTH_TIMEOUT="60"
+
+# How many image pulls update/backup run at once. Set 1 for sequential pulls.
+#PARALLEL_PULLS="3"
+
 # Keep only the newest N backup archives per app (older ones are pruned after
 # each backup). Leave unset to keep every archive.
 #BACKUP_KEEP="7"

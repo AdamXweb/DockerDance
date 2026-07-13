@@ -11,6 +11,25 @@ The changes below are on the way to the next release. Until they're tagged,
 `update-self` will not offer them.
 
 ### Added
+- **`status` dashboard.** One line per app - a coloured up/stopped dot,
+  container state, image and health - built read-only from `compose ps -q`
+  plus `docker inspect`.
+- **`doctor` command.** Read-only environment/config check: docker daemon,
+  compose flavour, curl/wget/fzf, the system-update package manager, tar
+  safety, `DOCKER_VOLUMES` writability, `manage.conf`, stale lock, effective
+  settings and discovered apps.
+- **Health-aware start.** After `up -d`, `start`/`restart`/`update`/`backup`/
+  `restore` wait for containers to become healthy (or just running, with no
+  healthcheck) before reporting done. Tunable with `HEALTH_TIMEOUT` (0 skips).
+- **Parallel image pulls.** `update` and `backup` pull all target apps'
+  images at once, up to `PARALLEL_PULLS` (default 3); a failed pull leaves
+  that app on its current image and is skipped rather than aborting the run.
+- **`--dry-run`** previews any command without touching anything, **`-y`/`--yes`**
+  skips confirmations (and lets `restore` run non-interactively), and **update**
+  now confirms before recreating containers on a terminal. **`--no-color`** flag.
+- **Multi-app selection in the menu.** fzf `TAB` multi-select, or a
+  space/comma list in the numbered fallback.
+- **zsh and fish completions** alongside the bash one.
 - **Zero-config app discovery.** `Apps="auto"` (the new default) manages every
   folder that contains a compose file (`docker-compose.yml`/`.yaml` or
   `compose.yml`/`.yaml`, or one folder deeper), in alphabetical order. Drop
@@ -53,6 +72,16 @@ The changes below are on the way to the next release. Until they're tagged,
   (portable restores); a second backup in the same day no longer overwrites the
   first.
 - Multi-app runs end with a per-app summary table (app / action / seconds).
+
+### Security
+- **`restore` treats archives as untrusted.** Extraction happens in an
+  isolated staging area (never `tar -C /`); members with `..` traversal or
+  absolute paths are refused; legacy absolute-path archives are declined on
+  busybox tar; and only the app's own folder is promoted into place. A
+  tampered backup can no longer write elsewhere on disk.
+- **Unpredictable temp file.** The step-output log is created with `mktemp`
+  (owner-only, random name) instead of a predictable `/tmp` name, closing a
+  symlink pre-creation angle when running as root.
 
 ### Fixed
 - **Graceful shutdown before backup.** `docker compose kill` (SIGKILL) is
