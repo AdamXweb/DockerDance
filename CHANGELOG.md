@@ -11,6 +11,9 @@ The first release since v0.1.0 - a substantial robustness, safety and UX
 overhaul. `./manage.sh update-self` will offer this to anyone on v0.1.0.
 
 ### Added
+- **Docker install offer.** When Docker isn't installed, commands now point to
+  the official install docs and can fetch and run Docker's `get.docker.com`
+  script for you after you confirm (interactive only, never in cron).
 - **`status` dashboard.** One line per app - a coloured up/stopped dot,
   container state, image and health - built read-only from `compose ps -q`
   plus `docker inspect`.

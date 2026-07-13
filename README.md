@@ -21,7 +21,7 @@ This provides an easier way to update, restart and backup apps/services.
 
 ### Prerequisites
 - A Unix-like operating system: macOS, Linux, BSD. On Windows: WSL2 is preferred, but cygwin or msys also mostly work.
-- Docker, either with old compose (`docker-compose`) or the updated compose plugin (`docker compose`) — the script detects which you have
+- Docker, either with old compose (`docker-compose`) or the updated compose plugin (`docker compose`) — the script detects which you have. If Docker isn't installed, running any command points you to the [official installer](https://docs.docker.com/engine/install/) and can fetch and run Docker's `get.docker.com` script for you (after you confirm)
 - Each service contained in a folder within a `docker_volumes` folder, with its own compose file (`docker-compose.yml`/`.yaml` or `compose.yml`/`.yaml`). The script finds these folders for you (see `Apps="auto"` below)
 - Optional: [fzf](https://github.com/junegunn/fzf) for a fuzzy app-picker in the interactive menu — the menu works without it
 
@@ -30,18 +30,15 @@ The folders have been setup for use on a new server to make use of the script's 
 If you are starting on a new server, you can clone the contents of this repo directly into your user folder with 
 `git clone https://github.com/AdamXweb/DockerDance.git .`
 
-### Precautions
-Please note that this script was designed to work in my environment. The output fit the needs that I face to bulk manage docker apps/services.
-It's a good idea to inspect a script from projects you don't yet know. You can do
-that by downloading the install script first, looking through it so everything looks normal,
-then running it:
+### Installing the script
+DockerDance is just the single `manage.sh` file. Download it **into your `docker_volumes` folder** and make it executable — it's a good idea to inspect a script from a project you don't yet know first, so grab it, read through it, then run it:
 
-#### Downloading the script
-Docker management can be used as the script itself by downloading with a method of your choice, either directly or [from the releases](https://github.com/AdamXweb/DockerDance/releases)
-| Method    | Command                                                                                           |
+| Method    | Command (run from inside your `docker_volumes` folder)                                            |
 | :-------- | :------------------------------------------------------------------------------------------------ |
-| **curl**  | `sh -c "$(curl -fsSL https://raw.githubusercontent.com/AdamXweb/DockerDance/main/docker_volumes/manage.sh)"` |
-| **wget**  | `sh -c "$(wget -O- https://raw.githubusercontent.com/AdamXweb/DockerDance/main/docker_volumes/manage.sh)"`   |
+| **curl**  | `curl -fsSL https://raw.githubusercontent.com/AdamXweb/DockerDance/main/docker_volumes/manage.sh -o manage.sh && chmod +x manage.sh` |
+| **wget**  | `wget -O manage.sh https://raw.githubusercontent.com/AdamXweb/DockerDance/main/docker_volumes/manage.sh && chmod +x manage.sh` |
+
+Then run `./manage.sh` for the interactive menu, or `./manage.sh help` for the command list. You can also pin a specific version [from the releases](https://github.com/AdamXweb/DockerDance/releases); `./manage.sh update-self` updates it to the latest release later. (Prefer git? `git clone https://github.com/AdamXweb/DockerDance.git .` into your user folder gives you the whole `docker_volumes` layout.)
 
 
 #### Customise variables

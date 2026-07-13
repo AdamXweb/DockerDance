@@ -182,11 +182,47 @@ acquire_lock() {
   HAVE_LOCK=1
 }
 
+#Docker's official install ("convenience") script. Only ever fetched from here.
+DOCKER_INSTALL_URL="https://get.docker.com"
+
+#Docker isn't installed: point at the official docs, and - only interactively,
+#never in cron - offer to fetch and run Docker's official install script. The
+#script uses sudo itself where it needs root. Defaults to no.
+offer_docker_install() {
+  echo "  Install Docker for your platform: https://docs.docker.com/engine/install/"
+  echo "  Or use Docker's official script (review it first; it needs root):"
+  echo "    curl -fsSL $DOCKER_INSTALL_URL -o get-docker.sh && sh get-docker.sh"
+  #Never auto-install: needs a terminal and a downloader, and dry-run just shows the hint
+  [ -n "${DRY_RUN:-}" ] && return 0
+  [ -t 0 ] || return 0
+  command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || return 0
+  printf 'Download and run the official Docker install script now? [y/N] '
+  read -r odi_ans || odi_ans=""
+  case "$odi_ans" in
+    y | Y | yes | YES ) ;;
+    * ) return 0 ;;
+  esac
+  odi_dir=$(mktemp -d "${TMPDIR:-/tmp}/dockerdance-getdocker.XXXXXX" 2>/dev/null) || { odi_dir="${TMPDIR:-/tmp}/dockerdance-getdocker.$$"; mkdir -p "$odi_dir"; }
+  echo "Downloading $DOCKER_INSTALL_URL ..."
+  if fetch_url "$DOCKER_INSTALL_URL" >"$odi_dir/get-docker.sh" && [ -s "$odi_dir/get-docker.sh" ]; then
+    echo "Running the installer (you may be prompted for a sudo password)..."
+    if sh "$odi_dir/get-docker.sh"; then
+      success "Docker installed. You may need to log out and back in for group membership to apply, then re-run this command."
+    else
+      error "The Docker install script exited with an error - see its output above."
+    fi
+  else
+    error "Couldn't download the Docker install script from $DOCKER_INSTALL_URL."
+  fi
+  rm -rf "$odi_dir"
+}
+
 #Check Docker is installed, the daemon is reachable and compose is available
 DOCKER_COMPOSE_COMMAND=""
 require_docker() {
   if ! command -v docker >/dev/null 2>&1; then
-    error "Please install Docker before proceeding."
+    error "Docker isn't installed (or isn't in your PATH)."
+    offer_docker_install
     exit 1
   fi
   if ! docker info >/dev/null 2>&1; then
@@ -841,7 +877,7 @@ run_doctor() {
       dbad "Docker is installed but the daemon isn't reachable (start it, or add your user to the docker group)"
     fi
   else
-    dbad "Docker not found in PATH"
+    dbad "Docker not found in PATH - install it from $DOCKER_INSTALL_URL (any app command will also offer to run the installer)"
   fi
   if docker compose version >/dev/null 2>&1; then
     dok "Compose plugin: docker compose ($(docker compose version --short 2>/dev/null))"
