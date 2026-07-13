@@ -412,6 +412,41 @@ restore_app() {
   record "$1" "restored"
 }
 
+#Update the host OS packages with whatever package manager is present.
+#Checked in order; the first hit wins, so distro managers beat homebrew.
+system_update() {
+  pm=""
+  for candidate in apt-get dnf yum pacman zypper apk brew; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      pm=$candidate
+      break
+    fi
+  done
+  if [ -z "$pm" ]; then
+    error "No supported package manager found (apt-get, dnf, yum, pacman, zypper, apk or brew)."
+    exit 1
+  fi
+  if [ "$pm" != "brew" ] && [ "$(id -u)" -ne 0 ]; then
+    error "System updates with $pm need root. Try: sudo ./manage.sh system-update"
+    exit 1
+  fi
+  if [ "$pm" = "brew" ] && [ "$(id -u)" -eq 0 ]; then
+    error "Homebrew refuses to run as root. Run this as your normal user."
+    exit 1
+  fi
+  actioninfo "Updating the system with ${bold}$pm${normal}"
+  case "$pm" in
+    apt-get ) apt-get update && apt-get upgrade -y ;;
+    dnf )     dnf upgrade --refresh -y ;;
+    yum )     yum update -y ;;
+    pacman )  pacman -Syu --noconfirm ;;
+    zypper )  zypper --non-interactive refresh && zypper --non-interactive update ;;
+    apk )     apk update && apk upgrade ;;
+    brew )    brew update && brew upgrade ;;
+  esac
+  success "System updated with $pm"
+}
+
 fetch_url() {
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL "$1"
@@ -477,7 +512,7 @@ Commands:
   logs         Show recent logs (follows the log when a single app is targeted)
   version      Show the image versions each app is using
   running      List running containers (docker ps)
-  apt          Update the host system with apt-get (Debian/Ubuntu)
+  system-update  Update the host OS packages (detects apt/dnf/yum/pacman/zypper/apk/brew; 'apt' still works as an alias)
   update-self  Update this script to the latest GitHub release
   help         Show this help (--version shows the script version)
 
@@ -610,14 +645,8 @@ run_command() {
       echo "Getting all running services"
       docker ps
       ;;
-    'apt' )
-      if ! command -v apt-get >/dev/null 2>&1; then
-        error "apt-get not found. This command is only for Debian/Ubuntu systems."
-        exit 1
-      fi
-      echo "Updating system with apt."
-      apt-get update && apt-get upgrade -y
-      success "System updated"
+    'system-update' | 'apt' )
+      system_update
       ;;
     'update-self' | 'updateself' )
       update_self

@@ -7,7 +7,7 @@
 _dockerdance() {
   local cur commands
   cur=${COMP_WORDS[COMP_CWORD]}
-  commands="start stop restart update backup restore logs version running apt update-self help"
+  commands="start stop restart update backup restore logs version running system-update update-self help"
   if [ "$COMP_CWORD" -eq 1 ]; then
     mapfile -t COMPREPLY < <(compgen -W "$commands" -- "$cur")
   else

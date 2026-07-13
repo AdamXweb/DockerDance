@@ -102,8 +102,8 @@ Puts the newest backup archive for the app back in place: stops the app, moves t
 `./manage.sh version`
 Display versions of images: `docker compose images`
 
-`./manage.sh apt`
-Just `apt-get update && apt-get upgrade -y`. Handy for those that don't want to mess with an alias.
+`./manage.sh system-update`
+Updates the host OS packages with whatever package manager the system has — `apt-get` (Debian/Ubuntu), `dnf` (Fedora/RHEL), `yum`, `pacman` (Arch), `zypper` (openSUSE), `apk` (Alpine) or `brew` (macOS) — detected in that order. Distro managers need root (it tells you to `sudo`); Homebrew refuses root and must run as your normal user. `./manage.sh apt` still works as an alias.
 
 `./manage.sh logs`
 Shows the recent logs for each app. When a single app is targeted (e.g. `./manage.sh logs linkace`) the log is followed live with `-f` — press Ctrl-C to stop.
