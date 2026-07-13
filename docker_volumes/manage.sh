@@ -299,6 +299,29 @@ leave_app() {
   cd "$APP_RETURN_DIR"
 }
 
+#Silent version of enter_app's lookup: echo the folder that holds the compose
+#file for app $1 (itself, or one unambiguous level down), or fail quietly.
+resolve_dir() {
+  if has_compose_file "$1"; then
+    echo "$1"
+    return 0
+  fi
+  rd_hit=""
+  rd_n=0
+  for rd in "$1"/*/; do
+    [ -d "$rd" ] || continue
+    if has_compose_file "$rd"; then
+      rd_hit=${rd%/}
+      rd_n=$((rd_n + 1))
+    fi
+  done
+  if [ "$rd_n" -eq 1 ]; then
+    echo "$rd_hit"
+    return 0
+  fi
+  return 1
+}
+
 #Is $1 one of the space-separated words in $2?
 in_list() {
   # shellcheck disable=SC2086 # $2 is an intentionally space-separated list
@@ -740,6 +763,153 @@ system_update() {
   success "System updated with $pm"
 }
 
+#One dashboard row per app: a coloured up/stopped dot, container state,
+#primary image and health. Read-only, and resilient to missing folders.
+status_row() {
+  sr_app=$1
+  sr_dir=$(resolve_dir "$sr_app") || sr_dir=""
+  sr_dot="$dim$DOT_OFF$normal"
+  sr_state="stopped"
+  sr_img="-"
+  sr_health="-"
+  if [ -z "$sr_dir" ]; then
+    printf '%s %-18s %-9s %-30s %s\n' "$dim?$normal" "$sr_app" "?" "(no compose file)" "-"
+    return 0
+  fi
+  sr_ids=$(cd "$sr_dir" && compose ps -q 2>/dev/null)
+  if [ -n "$sr_ids" ]; then
+    sr_total=0; sr_up=0; sr_unhealthy=0; sr_starting=0; sr_hchecks=0
+    # shellcheck disable=SC2086 # ids are one-per-line without spaces
+    for sr_id in $sr_ids; do
+      sr_total=$((sr_total + 1))
+      [ "$(docker inspect -f '{{.State.Status}}' "$sr_id" 2>/dev/null)" = "running" ] && sr_up=$((sr_up + 1))
+      sr_h=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$sr_id" 2>/dev/null)
+      case "$sr_h" in
+        healthy )   sr_hchecks=$((sr_hchecks + 1)) ;;
+        unhealthy ) sr_hchecks=$((sr_hchecks + 1)); sr_unhealthy=$((sr_unhealthy + 1)) ;;
+        starting )  sr_hchecks=$((sr_hchecks + 1)); sr_starting=$((sr_starting + 1)) ;;
+      esac
+      [ "$sr_img" = "-" ] && sr_img=$(docker inspect -f '{{.Config.Image}}' "$sr_id" 2>/dev/null)
+    done
+    if [ "$sr_up" -eq 0 ]; then
+      sr_state="stopped"; sr_dot="$dim$DOT_OFF$normal"
+    elif [ "$sr_up" -eq "$sr_total" ]; then
+      sr_state="up"; sr_dot="$green$DOT_ON$normal"
+    else
+      sr_state="$sr_up/$sr_total up"; sr_dot="$yellow$DOT_ON$normal"
+    fi
+    if [ "$sr_unhealthy" -gt 0 ]; then
+      sr_health="${red}unhealthy${normal}"
+    elif [ "$sr_starting" -gt 0 ]; then
+      sr_health="${yellow}starting${normal}"
+    elif [ "$sr_hchecks" -gt 0 ]; then
+      sr_health="${green}healthy${normal}"
+    fi
+  fi
+  [ -z "$sr_img" ] && sr_img="-"
+  sr_img=${sr_img%%,*}
+  if [ "${#sr_img}" -gt 30 ]; then
+    sr_img="$(printf '%.27s' "$sr_img")..."
+  fi
+  #dot (leading) and health (trailing) carry the only colour, so the padded
+  #plain columns in between still line up.
+  printf '%s %-18s %-9s %-30s %s\n' "$sr_dot" "$sr_app" "$sr_state" "$sr_img" "$sr_health"
+}
+
+show_status() {
+  echo "${bold}${cyan}DockerDance${normal} status - $(pwd)"
+  printf '  %-18s %-9s %-30s %s\n' "APP" "STATE" "IMAGE" "HEALTH"
+  for ss_app in "$@"; do
+    status_row "$ss_app"
+  done
+}
+
+#Diagnostics: check the environment and configuration without changing anything.
+run_doctor() {
+  dok()   { echo "  ${green}[ok]${normal}   $1"; }
+  dwarn() { echo "  ${yellow}[warn]${normal} $1"; }
+  dbad()  { echo "  ${red}[FAIL]${normal} $1"; }
+  echo "${bold}${cyan}DockerDance doctor${normal} - v$VERSION"
+  echo "  script:      $0"
+  echo "  working dir: $(pwd)"
+  echo "  OS:          $(uname -s) $(uname -r)"
+  echo "---"
+  if command -v docker >/dev/null 2>&1; then
+    if docker info >/dev/null 2>&1; then
+      dok "Docker daemon reachable ($(docker --version 2>/dev/null))"
+    else
+      dbad "Docker is installed but the daemon isn't reachable (start it, or add your user to the docker group)"
+    fi
+  else
+    dbad "Docker not found in PATH"
+  fi
+  if docker compose version >/dev/null 2>&1; then
+    dok "Compose plugin: docker compose ($(docker compose version --short 2>/dev/null))"
+  elif command -v docker-compose >/dev/null 2>&1; then
+    dwarn "Using legacy docker-compose ($(docker-compose version --short 2>/dev/null))"
+  else
+    dbad "No 'docker compose' plugin or 'docker-compose' found"
+  fi
+  if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
+    dok "curl/wget present (needed for update-self and NOTIFY_WEBHOOK)"
+  else
+    dwarn "Neither curl nor wget found - update-self and webhooks won't work"
+  fi
+  if command -v fzf >/dev/null 2>&1; then
+    dok "fzf present (fuzzy app picker in the menu)"
+  else
+    dwarn "fzf not found - the menu falls back to a numbered list"
+  fi
+  dr_pm=""
+  for dr_c in apt-get dnf yum pacman zypper apk brew; do
+    command -v "$dr_c" >/dev/null 2>&1 && { dr_pm=$dr_c; break; }
+  done
+  if [ -n "$dr_pm" ]; then
+    dok "Package manager for system-update: $dr_pm"
+  else
+    dwarn "No supported package manager found for system-update"
+  fi
+  if tar_is_busybox; then
+    dwarn "tar is busybox - legacy absolute-path backups can't be restored on this host"
+  else
+    dok "tar supports safe extraction"
+  fi
+  if [ -d "$DOCKER_VOLUMES" ]; then
+    if [ -w "$DOCKER_VOLUMES" ]; then
+      dok "DOCKER_VOLUMES writable: $DOCKER_VOLUMES"
+    else
+      dwarn "DOCKER_VOLUMES not writable by this user: $DOCKER_VOLUMES"
+    fi
+  else
+    dwarn "DOCKER_VOLUMES does not exist: $DOCKER_VOLUMES"
+  fi
+  if [ -f "./manage.conf" ]; then
+    dok "manage.conf found and loaded"
+  else
+    echo "  manage.conf: not present (using script defaults / environment)"
+  fi
+  if [ -d "$LOCK_DIR" ]; then
+    dwarn "A run lock exists ($LOCK_DIR) - another run is active, or it's stale (remove it if so)"
+  else
+    dok "No stale run lock"
+  fi
+  echo "---"
+  echo "  settings: STOP_TIMEOUT=$STOP_TIMEOUT  HEALTH_TIMEOUT=$HEALTH_TIMEOUT  PARALLEL_PULLS=$PARALLEL_PULLS  BACKUP_KEEP=${BACKUP_KEEP:-unset}  NOTIFY_WEBHOOK=$([ -n "${NOTIFY_WEBHOOK:-}" ] && echo set || echo unset)"
+  if [ "$Apps" = "auto" ] || [ -z "$Apps" ]; then
+    dr_saved=$Apps
+    discover_apps
+    dr_found=$Apps
+    Apps=$dr_saved
+    if [ -n "$dr_found" ]; then
+      dok "Apps=auto discovers:$dr_found"
+    else
+      dwarn "Apps=auto found no folders with a compose file here"
+    fi
+  else
+    echo "  Apps (pinned): $Apps"
+  fi
+}
+
 fetch_url() {
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL "$1"
@@ -802,9 +972,11 @@ Commands:
   update       Pull the latest images, then restart apps on them
   backup       Pull, stop, tar app folders into the backup folder, then start again
   restore      Put the newest backup archive back in place (current data is set aside)
+  status       Dashboard: each app's state, image and health at a glance
   logs         Show recent logs (follows the log when a single app is targeted)
   version      Show the image versions each app is using
   running      List running containers (docker ps)
+  doctor       Check the environment and configuration (read-only)
   system-update  Update the host OS packages (detects apt/dnf/yum/pacman/zypper/apk/brew; 'apt' still works as an alias)
   update-self  Update this script to the latest GitHub release
   help         Show this help (--version shows the script version)
@@ -823,7 +995,7 @@ EOF
 run_command() {
   menu_command=$1
   case "$menu_command" in
-    'backup' | 'restore' | 'update' | 'stop' | 'start' | 'restart' | 'logs' | 'version' ) maybe_discover_apps ;;
+    'backup' | 'restore' | 'update' | 'stop' | 'start' | 'restart' | 'logs' | 'version' | 'status' ) maybe_discover_apps ;;
   esac
   # shellcheck disable=SC2086 # Apps is an intentionally space-separated list
   set -- $Apps
@@ -961,6 +1133,14 @@ run_command() {
         leave_app
       done
       ;;
+    'status' )
+      checkDefault
+      require_docker
+      show_status "$@"
+      ;;
+    'doctor' )
+      run_doctor
+      ;;
     'running' )
       require_docker
       echo "Getting all running services"
@@ -1043,8 +1223,8 @@ interactive() {
     echo "${bold}${cyan}DockerDance${normal} ${dim}v$VERSION${normal} - what would you like to do?"
     echo "  1) start    2) stop     3) restart"
     echo "  4) update   5) backup   6) restore"
-    echo "  7) logs     8) version  9) running"
-    echo "  q) quit"
+    echo "  7) status   8) logs     9) version"
+    echo "  r) running  d) doctor   q) quit"
     printf "> "
     read -r choice || break
     case "$choice" in
@@ -1054,14 +1234,17 @@ interactive() {
       4 ) choice="update" ;;
       5 ) choice="backup" ;;
       6 ) choice="restore" ;;
-      7 ) choice="logs" ;;
-      8 ) choice="version" ;;
-      9 ) choice="running" ;;
+      7 ) choice="status" ;;
+      8 ) choice="logs" ;;
+      9 ) choice="version" ;;
+      r | R | running ) choice="running" ;;
+      d | D | doctor ) choice="doctor" ;;
       q | Q | quit | exit ) break ;;
       * ) echo "Not a valid choice."; continue ;;
     esac
     Apps=$ALL_APPS
-    if [ "$choice" != "running" ]; then
+    #status/running/doctor act on everything (or nothing), so skip the picker
+    if [ "$choice" != "running" ] && [ "$choice" != "status" ] && [ "$choice" != "doctor" ]; then
       # shellcheck disable=SC2086 # Apps is an intentionally space-separated list
       pick_app $Apps || continue
       if [ -n "$PICKED_APP" ]; then
