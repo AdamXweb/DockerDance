@@ -50,6 +50,8 @@ Docker management can be used as the script itself by downloading with a method 
 `STOP_TIMEOUT` (default `30`) - seconds to wait for containers to shut down gracefully before docker gives up. Raise it for databases that take a while to flush.
 `BACKUP_KEEP` (unset by default) - when set to a number, only that many most-recent backup archives are kept per app; older ones are pruned after each backup.
 
+`NOTIFY_WEBHOOK` (unset by default) - a webhook URL (Slack and Discord formats both work) that gets a message when an update, backup or restore completes or fails. Handy for cron runs. See issue [#3](https://github.com/AdamXweb/DockerDance/issues/3).
+
 Instead of editing the script, all of the above can live in a `manage.conf` file next to `manage.sh` (plain shell assignments, e.g. `Apps="linkace n8n"`). Settings there survive `update-self`.
 
 
@@ -91,8 +93,10 @@ Stops all the apps, then starts them up again.
 At the moment the script is limited to backing up files in each directory.
 Its function acts as an all in one for my use; It stops the container, backs up, updates and starts.
 
-### Restore 
-- todo see issue [#2](https://github.com/AdamXweb/DockerDance/issues/2)
+### Restore
+`./manage.sh restore linkace`
+
+Puts the newest backup archive for the app back in place: stops the app, moves the current folder aside to `<app>.pre-restore.<timestamp>` (nothing is deleted), extracts the archive, and starts the app again. Asks for confirmation and therefore needs a terminal. Pre-v0.2.0 archives (absolute paths) are detected and restored too. Closes issue [#2](https://github.com/AdamXweb/DockerDance/issues/2).
 
 #### Minor commands
 `./manage.sh version`
@@ -166,6 +170,7 @@ I have another system that connects and executes an [rsync](https://download.sam
 - If you'd like to see what's going on with your backups, you can change the `tar` command to `tar -cvjf` adding a v for verbose output to see what files it stops on
 - Running as a local user prompted permission issues when trying to tar the files that were created with root. This led to an early exit of the script.
 - Folder names identified under Apps can have a dot e.g `.n8n` at the front or special characters `uptime-kuma` as long as each entry is separated by a space e.g. `Apps=".n8n uptime-kuma linkace"`.
+- If an app's compose file sits one folder deeper (e.g. `myapp/src/docker-compose.yml`), the script follows it automatically as long as there's only one such folder (issue [#6](https://github.com/AdamXweb/DockerDance/issues/6)).
 - Non executable scripts may need permissions updated with `chmod +x ./docker_volumes/manage.sh` to ensure permissions are executable
 - backups may fail if you run out of space / if this is run on a cron to a local folder.
 - the backup folder is created automatically if it doesn't exist yet.

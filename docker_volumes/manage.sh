@@ -11,7 +11,8 @@ Apps="example"
 USERNAME="systemadmin"
 
 #Optional config file: put Apps/USERNAME (plus DOCKER_VOLUMES, STOP_TIMEOUT,
-#BACKUP_KEEP) in a manage.conf next to the script and they survive update-self
+#BACKUP_KEEP, NOTIFY_WEBHOOK) in a manage.conf next to the script and they
+#survive update-self
 if [ -f "./manage.conf" ]; then
   # shellcheck source=/dev/null
   . "./manage.conf"
@@ -68,16 +69,35 @@ STEP_LOG="${TMPDIR:-/tmp}/dockerdance-step.$$.log"
 #against a cron backup overlapping a manual update)
 LOCK_DIR="${TMPDIR:-/tmp}/dockerdance$(pwd | tr '/ ' '__').lock"
 HAVE_LOCK=""
+NOTIFY_CONTEXT=""
 cleanup() {
+  cleanup_status=$?
   tput cnorm 2>/dev/null || true
   rm -f "$STEP_LOG"
   if [ -n "$HAVE_LOCK" ]; then
     rmdir "$LOCK_DIR" 2>/dev/null || true
   fi
+  if [ "$cleanup_status" -ne 0 ] && [ -n "$NOTIFY_CONTEXT" ]; then
+    notify "$NOTIFY_CONTEXT failed (exit $cleanup_status)"
+  fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+#NOTIFY_WEBHOOK (optional, set in manage.conf or the environment): URL that
+#receives a message when update/backup/restore completes or fails. The JSON
+#payload suits Slack ("text") and Discord ("content") webhooks. Issue #3.
+notify() {
+  [ -z "${NOTIFY_WEBHOOK:-}" ] && return 0
+  notify_payload="{\"text\": \"DockerDance: $1\", \"content\": \"DockerDance: $1\"}"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS -m 10 -H 'Content-Type: application/json' -d "$notify_payload" "$NOTIFY_WEBHOOK" >/dev/null 2>&1 || warn "Webhook notification failed"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -T 10 --header 'Content-Type: application/json' --post-data "$notify_payload" -O /dev/null "$NOTIFY_WEBHOOK" 2>/dev/null || warn "Webhook notification failed"
+  fi
+  return 0
+}
 
 actioninfo() {
   echo "${bold}${cyan}[action]${normal} $ARROW $1"
@@ -179,12 +199,44 @@ checkDefault() {
   fi
 }
 
+has_compose_file() {
+  [ -f "$1/docker-compose.yml" ] || [ -f "$1/docker-compose.yaml" ] || [ -f "$1/compose.yml" ] || [ -f "$1/compose.yaml" ]
+}
+
 enter_app() {
+  APP_RETURN_DIR=$(pwd)
   if [ ! -d "$1" ]; then
     error "No folder named '$1' here. Run this from the docker_volumes folder and check the Apps variable / arguments."
     exit 1
   fi
   cd "$1"
+  if has_compose_file .; then
+    return 0
+  fi
+  #The compose file may sit one folder deeper (issue #6) - follow it when unambiguous
+  nested=""
+  nested_count=0
+  for nested_dir in */; do
+    [ -d "$nested_dir" ] || continue
+    if has_compose_file "$nested_dir"; then
+      nested=$nested_dir
+      nested_count=$((nested_count + 1))
+    fi
+  done
+  if [ "$nested_count" -eq 1 ]; then
+    cd "$nested"
+    return 0
+  fi
+  if [ "$nested_count" -gt 1 ]; then
+    error "'$1' contains several nested folders with compose files - list those folders in Apps directly."
+  else
+    error "No compose file found in '$1' (or one level below it)."
+  fi
+  exit 1
+}
+
+leave_app() {
+  cd "$APP_RETURN_DIR"
 }
 
 #Progress counter shown when more than one app is being processed
@@ -246,7 +298,7 @@ start_app() {
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
   ok "$(counter)$1 started"
   record "$1" "started"
-  cd ..
+  leave_app
 }
 
 stop_app() {
@@ -256,7 +308,7 @@ stop_app() {
   run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT"
   ok "$(counter)$1 stopped"
   record "$1" "stopped"
-  cd ..
+  leave_app
 }
 
 restart_app() {
@@ -266,7 +318,7 @@ restart_app() {
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
   ok "$(counter)$1 restarted"
   record "$1" "restarted"
-  cd ..
+  leave_app
 }
 
 update_app() {
@@ -278,7 +330,7 @@ update_app() {
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
   ok "$(counter)$1 updated and running"
   record "$1" "updated"
-  cd ..
+  leave_app
 }
 
 backup_app() {
@@ -307,7 +359,57 @@ backup_app() {
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
   ok "$(counter)$1 backed up, updated and running"
   record "$1" "backed up"
-  cd ..
+  leave_app
+}
+
+#Restore the newest backup for an app (issue #2). Current data is moved
+#aside - never deleted - so a bad restore is always reversible by hand.
+restore_app() {
+  app_start=$(date +%s)
+  # shellcheck disable=SC2012 # archive names are script-generated (no spaces/newlines)
+  archive=$(ls -1t "${TARGET}${1}"[0-9]*.tar.bz2 2>/dev/null | head -1)
+  if [ -z "$archive" ]; then
+    error "No backups found for '$1' in $TARGET"
+    exit 1
+  fi
+  #Which layout is inside? New backups hold '<app>/...', pre-v0.2.0 ones held absolute paths
+  first_member=$(tar -tjf "$archive" 2>/dev/null | head -1)
+  case "$first_member" in
+    "$1"/* ) restore_root=$DOCKER_VOLUMES ;;
+    *docker_volumes/"$1"/* ) restore_root="/" ;;
+    * )
+      error "Unrecognised layout in ${archive##*/} - restore it manually with tar."
+      exit 1
+      ;;
+  esac
+  echo "$(counter)Restoring ${bold}$1${normal} from ${archive##*/}"
+  if [ -t 0 ]; then
+    printf '%s' "This replaces ${DOCKER_VOLUMES}${1} (current data is set aside, not deleted). Continue? [y/N] "
+    read -r answer || answer=""
+    case "$answer" in
+      y | Y | yes | YES ) ;;
+      * ) echo "Skipped $1."; return 0 ;;
+    esac
+  else
+    error "restore needs a terminal to confirm. Run it interactively."
+    exit 1
+  fi
+  enter_app "$1"
+  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT"
+  leave_app
+  aside="${DOCKER_VOLUMES}${1}.pre-restore.$(date '+%Y%m%d%H%M%S')"
+  mv "${DOCKER_VOLUMES}${1}" "$aside"
+  if ! run_step "$(counter)Extracting ${bold}${archive##*/}${normal}" tar -xjf "$archive" -C "$restore_root"; then
+    rm -rf "${DOCKER_VOLUMES:?}${1}"
+    mv "$aside" "${DOCKER_VOLUMES}${1}"
+    error "Restore failed - the original data was put back."
+    exit 1
+  fi
+  enter_app "$1"
+  run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
+  leave_app
+  ok "$(counter)$1 restored. Previous data kept at ${aside##*/} - delete it once you're happy"
+  record "$1" "restored"
 }
 
 fetch_url() {
@@ -371,6 +473,7 @@ Commands:
   restart      Stop apps, then start them again
   update       Pull the latest images, then restart apps on them
   backup       Pull, stop, tar app folders into the backup folder, then start again
+  restore      Put the newest backup archive back in place (current data is set aside)
   logs         Show recent logs (follows the log when a single app is targeted)
   version      Show the image versions each app is using
   running      List running containers (docker ps)
@@ -392,12 +495,13 @@ run_command() {
   APP_NUM=0
   SUMMARY=""
   case "$menu_command" in
-    'backup' | 'update' | 'stop' | 'start' | 'restart' ) acquire_lock ;;
+    'backup' | 'update' | 'stop' | 'start' | 'restart' | 'restore' ) acquire_lock ;;
   esac
   case "$menu_command" in
     'backup' )
       checkDefault
       require_docker
+      NOTIFY_CONTEXT="Backup of $*"
       actioninfo "${bold}Backing up${normal} apps including:"
       list_apps "$@"
       for app in "$@"; do
@@ -406,9 +510,23 @@ run_command() {
       done
       print_summary
       success "Backing up completed in $(elapsed)"
+      notify "Backup of $* completed in $(elapsed)"
+      NOTIFY_CONTEXT=""
       ;;
     'restore' )
-      echo "Coming soon:"
+      checkDefault
+      require_docker
+      NOTIFY_CONTEXT="Restore of $*"
+      actioninfo "${bold}Restoring${normal} apps from their latest backups:"
+      list_apps "$@"
+      for app in "$@"; do
+        APP_NUM=$((APP_NUM + 1))
+        restore_app "$app"
+      done
+      print_summary
+      success "Restore completed in $(elapsed)"
+      notify "Restore of $* completed in $(elapsed)"
+      NOTIFY_CONTEXT=""
       ;;
     'logs' )
       checkDefault
@@ -417,19 +535,20 @@ run_command() {
         echo "Following ${bold}$1${normal} logs (Ctrl-C to stop)"
         enter_app "$1"
         compose logs -f
-        cd ..
+        leave_app
       else
         for app in "$@"; do
           echo "Getting ${bold}$app${normal} logs"
           enter_app "$app"
           compose logs --tail=20
-          cd ..
+          leave_app
         done
       fi
       ;;
     'update' )
       checkDefault
       require_docker
+      NOTIFY_CONTEXT="Update of $*"
       actioninfo "${bold}Updating all services.${normal}"
       list_apps "$@"
       for app in "$@"; do
@@ -438,6 +557,8 @@ run_command() {
       done
       print_summary
       success "Services updated in $(elapsed). Give them a moment to warm up."
+      notify "Update of $* completed in $(elapsed)"
+      NOTIFY_CONTEXT=""
       ;;
     'stop' )
       checkDefault
@@ -481,7 +602,7 @@ run_command() {
         echo "Getting ${bold}$app${normal} version"
         enter_app "$app"
         compose images
-        cd ..
+        leave_app
       done
       ;;
     'running' )
@@ -570,8 +691,9 @@ interactive() {
     echo ""
     echo "${bold}${cyan}DockerDance${normal} ${dim}v$VERSION${normal} - what would you like to do?"
     echo "  1) start    2) stop     3) restart"
-    echo "  4) update   5) backup   6) logs"
-    echo "  7) version  8) running  q) quit"
+    echo "  4) update   5) backup   6) restore"
+    echo "  7) logs     8) version  9) running"
+    echo "  q) quit"
     printf "> "
     read -r choice || break
     case "$choice" in
@@ -580,9 +702,10 @@ interactive() {
       3 ) choice="restart" ;;
       4 ) choice="update" ;;
       5 ) choice="backup" ;;
-      6 ) choice="logs" ;;
-      7 ) choice="version" ;;
-      8 ) choice="running" ;;
+      6 ) choice="restore" ;;
+      7 ) choice="logs" ;;
+      8 ) choice="version" ;;
+      9 ) choice="running" ;;
       q | Q | quit | exit ) break ;;
       * ) echo "Not a valid choice."; continue ;;
     esac
