@@ -11,6 +11,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: ShellCheck
-        run: shellcheck docker_volumes/manage.sh
+        run: shellcheck docker_volumes/manage.sh contrib/dockerdance-completion.bash
       - name: POSIX syntax check (dash)
         run: sh -n docker_volumes/manage.sh

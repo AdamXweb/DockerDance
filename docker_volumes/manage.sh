@@ -1,10 +1,21 @@
 #!/bin/sh
 set -e
 
+VERSION="0.2.0"
+#Repo used by update-self; override with DOCKERDANCE_REPO=owner/name
+SELF_REPO="${DOCKERDANCE_REPO:-AdamXweb/DockerDance}"
+
 #Set these variables!
 #Apps to backup (according to the folder name). Add each one with a space in between e.g. "vaultwarden uptime-kuma"
 Apps="example"
 USERNAME="systemadmin"
+
+#Optional config file: put Apps/USERNAME (plus DOCKER_VOLUMES, STOP_TIMEOUT,
+#BACKUP_KEEP) in a manage.conf next to the script and they survive update-self
+if [ -f "./manage.conf" ]; then
+  # shellcheck source=/dev/null
+  . "./manage.conf"
+fi
 
 #Specific to Linux. Can change these if needed
 #Set folder from root to avoid permission issues if running script as different user. (this would be /home/systemadmin/docker_volumes)
@@ -47,11 +58,22 @@ case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
     ARROW='=>'
     ;;
 esac
+case "$SPINNER_FRAMES" in
+  ⠋* ) DOT_ON='●' DOT_OFF='○' ;;
+  * )  DOT_ON='*' DOT_OFF='-' ;;
+esac
 
 STEP_LOG="${TMPDIR:-/tmp}/dockerdance-step.$$.log"
+#One state-changing run at a time per docker_volumes folder (protects
+#against a cron backup overlapping a manual update)
+LOCK_DIR="${TMPDIR:-/tmp}/dockerdance$(pwd | tr '/ ' '__').lock"
+HAVE_LOCK=""
 cleanup() {
   tput cnorm 2>/dev/null || true
   rm -f "$STEP_LOG"
+  if [ -n "$HAVE_LOCK" ]; then
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -107,6 +129,15 @@ run_step() {
   fi
   rm -f "$STEP_LOG"
   return 0
+}
+
+acquire_lock() {
+  [ -n "$HAVE_LOCK" ] && return 0
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    error "Another manage.sh run appears to be active here (lock: $LOCK_DIR). Remove that folder if it's stale."
+    exit 1
+  fi
+  HAVE_LOCK=1
 }
 
 #Check Docker is installed, the daemon is reachable and compose is available
@@ -262,30 +293,90 @@ backup_app() {
     warn "${archive##*/} already exists - keeping it and adding a timestamp to this one"
     archive="${TARGET}${1}$(date '+%Y-%m-%d_%H%M%S').tar.bz2"
   fi
-  run_step "$(counter)Backing up ${bold}$1${normal}" tar -cjf "$archive" "${DOCKER_VOLUMES}${1}"
+  #Relative paths inside the archive make restores portable; 600 keeps the
+  #.env secrets inside it private
+  run_step "$(counter)Backing up ${bold}$1${normal}" tar -C "$DOCKER_VOLUMES" -cjf "$archive" "$1"
+  chmod 600 "$archive"
+  if [ -n "${BACKUP_KEEP:-}" ]; then
+    # shellcheck disable=SC2012 # archive names are script-generated (no spaces/newlines)
+    ls -1t "${TARGET}${1}"[0-9]*.tar.bz2 2>/dev/null | tail -n +"$((BACKUP_KEEP + 1))" | while IFS= read -r old_backup; do
+      rm -f "$old_backup"
+      warn "Pruned old backup ${old_backup##*/} (BACKUP_KEEP=$BACKUP_KEEP)"
+    done
+  fi
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
   ok "$(counter)$1 backed up, updated and running"
   record "$1" "backed up"
   cd ..
 }
 
+fetch_url() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$1"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- "$1"
+  else
+    error "curl or wget is required to download updates."
+    exit 1
+  fi
+}
+
+update_self() {
+  actioninfo "Checking the latest ${bold}$SELF_REPO${normal} release"
+  latest_tag=$(fetch_url "https://api.github.com/repos/$SELF_REPO/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+  if [ -z "$latest_tag" ]; then
+    error "Couldn't find a release for $SELF_REPO. Are you online?"
+    exit 1
+  fi
+  new_script="$0.new.$$"
+  if ! fetch_url "https://raw.githubusercontent.com/$SELF_REPO/$latest_tag/docker_volumes/manage.sh" > "$new_script"; then
+    rm -f "$new_script"
+    error "Downloading manage.sh at $latest_tag failed."
+    exit 1
+  fi
+  new_version=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' "$new_script" | head -1)
+  if [ -z "$new_version" ]; then
+    rm -f "$new_script"
+    error "Release $latest_tag predates self-updating (it has no VERSION). Update manually from https://github.com/$SELF_REPO/releases"
+    exit 1
+  fi
+  if [ "$new_version" = "$VERSION" ]; then
+    rm -f "$new_script"
+    success "Already up to date (v$VERSION, release $latest_tag)."
+    return 0
+  fi
+  if ! sh -n "$new_script" 2>/dev/null; then
+    rm -f "$new_script"
+    error "The downloaded script failed a syntax check - not installing it."
+    exit 1
+  fi
+  #Carry the Apps/USERNAME configured in this copy across the update
+  #(put them in manage.conf to avoid relying on this)
+  sed "s|^Apps=\".*\"|Apps=\"$ORIGINAL_APPS\"|; s|^USERNAME=\".*\"|USERNAME=\"$USERNAME\"|" "$new_script" > "$new_script.tmp"
+  mv "$new_script.tmp" "$new_script"
+  chmod +x "$new_script"
+  mv "$new_script" "$0"
+  success "Updated v$VERSION -> v$new_version ($latest_tag). Apps/USERNAME configuration carried over."
+}
+
 usage() {
   cat <<EOF
-${bold}${cyan}DockerDance${normal} - bulk manage docker compose apps
+${bold}${cyan}DockerDance${normal} v$VERSION - bulk manage docker compose apps
 
 Usage: ./manage.sh <command> [app ...]
 
 Commands:
-  start     Start apps (docker compose up -d)
-  stop      Stop apps gracefully (docker compose stop)
-  restart   Stop apps, then start them again
-  update    Stop apps, pull the latest images and start them again
-  backup    Stop apps, tar their folders into the backup folder, then update and start them
-  logs      Show recent logs (follows the log when a single app is targeted)
-  version   Show the image versions each app is using
-  running   List running containers (docker ps)
-  apt       Update the host system with apt-get (Debian/Ubuntu)
-  help      Show this help
+  start        Start apps (docker compose up -d)
+  stop         Stop apps gracefully (docker compose stop)
+  restart      Stop apps, then start them again
+  update       Pull the latest images, then restart apps on them
+  backup       Pull, stop, tar app folders into the backup folder, then start again
+  logs         Show recent logs (follows the log when a single app is targeted)
+  version      Show the image versions each app is using
+  running      List running containers (docker ps)
+  apt          Update the host system with apt-get (Debian/Ubuntu)
+  update-self  Update this script to the latest GitHub release
+  help         Show this help (--version shows the script version)
 
 Commands run against every app in the Apps variable. Pass one or more
 folder names to target specific apps instead, e.g. ./manage.sh restart linkace
@@ -300,6 +391,9 @@ run_command() {
   APP_TOTAL=$#
   APP_NUM=0
   SUMMARY=""
+  case "$menu_command" in
+    'backup' | 'update' | 'stop' | 'start' | 'restart' ) acquire_lock ;;
+  esac
   case "$menu_command" in
     'backup' )
       checkDefault
@@ -404,6 +498,12 @@ run_command() {
       apt-get update && apt-get upgrade -y
       success "System updated"
       ;;
+    'update-self' | 'updateself' )
+      update_self
+      ;;
+    '--version' | '-V' )
+      echo "DockerDance manage.sh v$VERSION"
+      ;;
     'help' | '-h' | '--help' )
       usage
       ;;
@@ -415,21 +515,35 @@ run_command() {
   esac
 }
 
+#Green dot when a container whose compose project matches the app folder is up.
+#Best-effort: compose lowercases project names and strips leading symbols.
+status_dot() {
+  sd_proj=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/^[^a-z0-9]*//')
+  if [ -n "$sd_proj" ] && printf '%s\n' "$RUNNING_NAMES" | grep -q "^${sd_proj}[-_]"; then
+    printf '%s%s%s' "$green" "$DOT_ON" "$normal"
+  else
+    printf '%s%s%s' "$dim" "$DOT_OFF" "$normal"
+  fi
+}
+
 pick_app() {
   #Sets PICKED_APP to one app name, or "" for all apps. Returns 1 if cancelled.
   PICKED_APP=""
   if command -v fzf >/dev/null 2>&1; then
-    PICKED_APP=$(printf '%s\n' "all apps" "$@" | fzf --prompt="app> ") || return 1
+    #The preview pane shows live container status for the highlighted app
+    fzf_preview='if [ {} = "all apps" ]; then docker ps; else (cd {} && '"$DOCKER_COMPOSE_COMMAND"' ps) 2>/dev/null || echo "(no status)"; fi'
+    PICKED_APP=$(printf '%s\n' "all apps" "$@" | fzf --prompt="app> " --preview "$fzf_preview") || return 1
     if [ "$PICKED_APP" = "all apps" ]; then
       PICKED_APP=""
     fi
     return 0
   fi
+  RUNNING_NAMES=$(docker ps --format '{{.Names}}' 2>/dev/null || true)
   n=0
   echo "  0) all apps"
   for app in "$@"; do
     n=$((n + 1))
-    echo "  $n) $app"
+    echo "  $n) $(status_dot "$app") $app"
   done
   printf "Select an app [0-%s]: " "$n"
   read -r selection || return 1
@@ -454,7 +568,7 @@ interactive() {
   ALL_APPS=$Apps
   while :; do
     echo ""
-    echo "${bold}${cyan}DockerDance${normal} - what would you like to do?"
+    echo "${bold}${cyan}DockerDance${normal} ${dim}v$VERSION${normal} - what would you like to do?"
     echo "  1) start    2) stop     3) restart"
     echo "  4) update   5) backup   6) logs"
     echo "  7) version  8) running  q) quit"
@@ -483,7 +597,7 @@ interactive() {
     #Run in a subshell so one failed command reports and returns to the menu
     #instead of ending the whole session under set -e
     set +e
-    ( set -e; trap cleanup EXIT; run_command "$choice" )
+    ( set -e; trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM; run_command "$choice" )
     menu_status=$?
     set -e
     if [ "$menu_status" -ne 0 ]; then
@@ -505,6 +619,9 @@ fi
 
 COMMAND=$1
 shift
+#Remember the configured list: update-self writes it into the new script even
+#when this run targeted specific apps
+ORIGINAL_APPS=$Apps
 if [ $# -gt 0 ]; then
   #Remaining arguments target specific apps, e.g. ./manage.sh restart linkace
   Apps="$*"

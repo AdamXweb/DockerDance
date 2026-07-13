@@ -48,6 +48,9 @@ Docker management can be used as the script itself by downloading with a method 
 `USERNAME="systemadmin"` - The user folder that you store the `docker_volumes` in. If you're stuck, type `pwd` to find the path you're in, or `whoami` to get the user name.
 `DOCKER_VOLUMES` defaults to `/home/$USERNAME/docker_volumes/` and can be overwritten in the script, or from the environment without editing anything — handy for MacOS: `DOCKER_VOLUMES="/Users/UserName/docker_volumes/" ./manage.sh start`
 `STOP_TIMEOUT` (default `30`) - seconds to wait for containers to shut down gracefully before docker gives up. Raise it for databases that take a while to flush.
+`BACKUP_KEEP` (unset by default) - when set to a number, only that many most-recent backup archives are kept per app; older ones are pruned after each backup.
+
+Instead of editing the script, all of the above can live in a `manage.conf` file next to `manage.sh` (plain shell assignments, e.g. `Apps="linkace n8n"`). Settings there survive `update-self`.
 
 
 ## Commands
@@ -61,7 +64,9 @@ Every command runs against all the apps in the `Apps` variable by default. To ta
 ### Interactive menu
 `./manage.sh`
 
-Running the script with no arguments on a terminal opens a simple menu: pick a command, then pick an app (or all apps). If [fzf](https://github.com/junegunn/fzf) is installed it's used to fuzzy-pick the app; otherwise a plain numbered menu is shown — no extra dependencies required. Cron and piped usage are unaffected: without a terminal the script prints usage instead of waiting for input.
+Running the script with no arguments on a terminal opens a simple menu: pick a command, then pick an app (or all apps). If [fzf](https://github.com/junegunn/fzf) is installed it's used to fuzzy-pick the app with a live container-status preview pane; otherwise a plain numbered menu is shown with a running/stopped dot per app — no extra dependencies required. Cron and piped usage are unaffected: without a terminal the script prints usage instead of waiting for input.
+
+Colours and spinners appear only on capable terminals and respect [`NO_COLOR`](https://no-color.org). Only one state-changing run is allowed at a time per folder (a lock protects a cron backup from overlapping a manual update). Bash tab-completion is available: see [contrib/dockerdance-completion.bash](contrib/dockerdance-completion.bash).
 
 ### Stop
 `./manage.sh stop`
@@ -100,7 +105,10 @@ Just `apt-get update && apt-get upgrade -y`. Handy for those that don't want to 
 Shows the recent logs for each app. When a single app is targeted (e.g. `./manage.sh logs linkace`) the log is followed live with `-f` — press Ctrl-C to stop.
 
 `./manage.sh help`
-Show usage and the full list of commands.
+Show usage and the full list of commands. `./manage.sh --version` prints the script version.
+
+`./manage.sh update-self`
+Updates the script itself to the latest [GitHub release](https://github.com/AdamXweb/DockerDance/releases): downloads `manage.sh` at the release tag, syntax-checks it, carries your `Apps`/`USERNAME` settings over, and swaps it in place. (Use `manage.conf` for configuration and there's nothing to carry over.)
 
 
 
