@@ -67,7 +67,9 @@ case "$SPINNER_FRAMES" in
   * )  DOT_ON='*' DOT_OFF='-' ;;
 esac
 
-STEP_LOG="${TMPDIR:-/tmp}/dockerdance-step.$$.log"
+#mktemp gives an unpredictable, owner-only name so another user can't pre-create
+#it as a symlink and have root truncate a file through us. Fall back to the PID.
+STEP_LOG=$(mktemp "${TMPDIR:-/tmp}/dockerdance-step.XXXXXX" 2>/dev/null) || STEP_LOG="${TMPDIR:-/tmp}/dockerdance-step.$$.log"
 #One state-changing run at a time per docker_volumes folder (protects
 #against a cron backup overlapping a manual update)
 LOCK_DIR="${TMPDIR:-/tmp}/dockerdance$(pwd | tr '/ ' '__').lock"
@@ -403,8 +405,18 @@ backup_app() {
   leave_app
 }
 
+tar_is_busybox() {
+  case "$(tar --version 2>&1 | head -1)" in
+    *[Bb]usy[Bb]ox* ) return 0 ;;
+    * ) return 1 ;;
+  esac
+}
+
 #Restore the newest backup for an app (issue #2). Current data is moved
 #aside - never deleted - so a bad restore is always reversible by hand.
+#Archives are treated as untrusted: extraction happens into an isolated
+#staging dir (never straight onto the filesystem root), every member is
+#checked for path-traversal, and only the '<app>/' subtree is promoted.
 restore_app() {
   app_start=$(date +%s)
   # shellcheck disable=SC2012 # archive names are script-generated (no spaces/newlines)
@@ -413,16 +425,50 @@ restore_app() {
     error "No backups found for '$1' in $TARGET"
     exit 1
   fi
-  #Which layout is inside? New backups hold '<app>/...', pre-v0.2.0 ones held absolute paths
+  #Which layout is inside? New backups hold '<app>/...'; pre-v0.2.0 ones held
+  #absolute paths like '/home/x/docker_volumes/<app>/...'. Work out how many
+  #leading components to strip so the app folder lands at the top of staging.
   first_member=$(tar -tjf "$archive" 2>/dev/null | head -1)
-  case "$first_member" in
-    "$1"/* ) restore_root=$DOCKER_VOLUMES ;;
-    *docker_volumes/"$1"/* ) restore_root="/" ;;
+  first_rel=${first_member#/}
+  case "$first_rel" in
+    "$1"/* )
+      strip_count=0 ; layout="relative" ;;
+    */"$1"/* )
+      legacy_prefix=${first_rel%%/"$1"/*}
+      strip_count=$(printf '%s\n' "$legacy_prefix" | awk -F/ '{print NF}')
+      layout="legacy" ;;
     * )
       error "Unrecognised layout in ${archive##*/} - restore it manually with tar."
-      exit 1
-      ;;
+      exit 1 ;;
   esac
+  #Legacy absolute archives rely on GNU/bsdtar stripping the leading '/';
+  #busybox tar does not, so refuse that one combination rather than risk a
+  #write outside the staging dir.
+  if [ "$layout" = "legacy" ] && tar_is_busybox; then
+    error "${archive##*/} is a legacy absolute-path backup and your tar is busybox, which can't extract it safely. Restore it on a host with GNU tar."
+    exit 1
+  fi
+  #Reject any member with a '..' component (all layouts) or an absolute path
+  #(relative layout only - legacy members are absolute by design and stripped).
+  member_list=$(mktemp "${TMPDIR:-/tmp}/dockerdance-members.XXXXXX" 2>/dev/null) || member_list="${TMPDIR:-/tmp}/dockerdance-members.$$"
+  tar -tjf "$archive" 2>/dev/null > "$member_list"
+  bad_member=""
+  while IFS= read -r m; do
+    case "/$m/" in
+      */../* ) bad_member=$m; break ;;
+    esac
+    if [ "$layout" = "relative" ]; then
+      case "$m" in
+        /* ) bad_member=$m; break ;;
+      esac
+    fi
+  done < "$member_list"
+  rm -f "$member_list"
+  if [ -n "$bad_member" ]; then
+    error "Refusing to restore ${archive##*/}: unsafe path in archive ('$bad_member')."
+    exit 1
+  fi
+
   echo "$(counter)Restoring ${bold}$1${normal} from ${archive##*/}"
   if [ -t 0 ]; then
     printf '%s' "This replaces ${DOCKER_VOLUMES}${1} (current data is set aside, not deleted). Continue? [y/N] "
@@ -435,17 +481,33 @@ restore_app() {
     error "restore needs a terminal to confirm. Run it interactively."
     exit 1
   fi
+
   enter_app "$1"
   run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT"
   leave_app
+
+  #Stage under backup/ (same filesystem as the app folders, so the promote is
+  #an atomic rename) and extract there - never onto the host root.
+  mkdir -p "$TARGET"
+  staging=$(mktemp -d "${TARGET}restore.XXXXXX") || { error "Couldn't create a staging dir in $TARGET"; exit 1; }
   aside="${DOCKER_VOLUMES}${1}.pre-restore.$(date '+%Y%m%d%H%M%S')"
   mv "${DOCKER_VOLUMES}${1}" "$aside"
-  if ! run_step "$(counter)Extracting ${bold}${archive##*/}${normal}" tar -xjf "$archive" -C "$restore_root"; then
-    rm -rf "${DOCKER_VOLUMES:?}${1}"
-    mv "$aside" "${DOCKER_VOLUMES}${1}"
+  extract_ok=1
+  if [ "$strip_count" -gt 0 ]; then
+    run_step "$(counter)Extracting ${bold}${archive##*/}${normal}" tar -xjf "$archive" -C "$staging" --strip-components="$strip_count" || extract_ok=0
+  else
+    run_step "$(counter)Extracting ${bold}${archive##*/}${normal}" tar -xjf "$archive" -C "$staging" || extract_ok=0
+  fi
+  [ -d "$staging/$1" ] || extract_ok=0
+  if [ "$extract_ok" -ne 1 ]; then
+    rm -rf "$staging"
+    [ -e "${DOCKER_VOLUMES}${1}" ] || mv "$aside" "${DOCKER_VOLUMES}${1}"
     error "Restore failed - the original data was put back."
     exit 1
   fi
+  mv "$staging/$1" "${DOCKER_VOLUMES}${1}"
+  rm -rf "$staging"
+
   enter_app "$1"
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
   leave_app
