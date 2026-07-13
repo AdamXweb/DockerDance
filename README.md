@@ -39,26 +39,28 @@ then running it:
 Docker management can be used as the script itself by downloading with a method of your choice, either directly or [from the releases](https://github.com/AdamXweb/DockerDance/releases)
 | Method    | Command                                                                                           |
 | :-------- | :------------------------------------------------------------------------------------------------ |
-| **curl**  | `sh -c "$(curl -fsSL https://raw.githubusercontent.com/adamxweb/DockerDance/master/docker_volumes/manage.sh)"` |
-| **wget**  | `sh -c "$(wget -O- https://raw.githubusercontent.com/ohmyzsh/DockerDance/master/docker_volumes/manage.sh)"`   |
+| **curl**  | `sh -c "$(curl -fsSL https://raw.githubusercontent.com/AdamXweb/DockerDance/main/docker_volumes/manage.sh)"` |
+| **wget**  | `sh -c "$(wget -O- https://raw.githubusercontent.com/AdamXweb/DockerDance/main/docker_volumes/manage.sh)"`   |
 
 
 #### Customise variables
 `Apps="example"` - Change to the exact wording of each folder within `docker_volumes` e.g. `Apps="linkace .n8n dashy"`
 `USERNAME="systemadmin"` - The user folder that you store the `docker_volumes` in. If you're stuck, type `pwd` to find the path you're in, or `whoami` to get the user name.
-`DOCKER_VOLUMES='/home/'$USERNAME'/docker_volumes/'` can be overwritten with `/Users/UserName/docker_volumes/` for MacOS
+`DOCKER_VOLUMES` defaults to `/home/$USERNAME/docker_volumes/` and can be overwritten in the script, or from the environment without editing anything — handy for MacOS: `DOCKER_VOLUMES="/Users/UserName/docker_volumes/" ./manage.sh start`
 
 
 ## Commands
-There are a few commands you can use with the script. Be warned, as at this stage its use is to manage multiple apps rather than a single one.
+There are a few commands you can use with the script.
 Side note, the script executes commands in the order they are listed as e.g. `Apps="1 2 3"` iterates in that order
 
-First, make sure you are in the `docker_volumes` folder, and execute any of the commands below/
+First, make sure you are in the `docker_volumes` folder, and execute any of the commands below.
+
+Every command runs against all the apps in the `Apps` variable by default. To target one or more specific apps, add their folder names after the command, e.g. `./manage.sh restart linkace` or `./manage.sh update linkace uptime-kuma`.
 
 ### Stop
 `./manage.sh stop`
 
-Stops all the apps by navigating through each folder and stopping the docker process
+Stops all the apps by navigating through each folder and stopping them gracefully with `docker compose stop`, giving databases time to finish writing before shutdown
 
 ### Start
 `./manage.sh start`
@@ -83,13 +85,16 @@ Its function acts as an all in one for my use; It stops the container, backs up,
 
 #### Minor commands
 `./manage.sh version`
-Display versions of images: `docker compose images
-`
+Display versions of images: `docker compose images`
+
 `./manage.sh apt`
-Just `apt update && apt upgrade` & `apt-get update && apt-get upgrade`. Handy for those that don't want to mess with an alias.
+Just `apt-get update && apt-get upgrade -y`. Handy for those that don't want to mess with an alias.
 
 `./manage.sh logs`
-Docker logs.
+Shows the recent logs for each app. When a single app is targeted (e.g. `./manage.sh logs linkace`) the log is followed live with `-f` — press Ctrl-C to stop.
+
+`./manage.sh help`
+Show usage and the full list of commands.
 
 
 
@@ -149,7 +154,7 @@ I have another system that connects and executes an [rsync](https://download.sam
 - Folder names identified under Apps can have a dot e.g `.n8n` at the front or special characters `uptime-kuma` as long as each entry is separated by a space e.g. `Apps=".n8n uptime-kuma linkace"`.
 - Non executable scripts may need permissions updated with `chmod +x ./docker_volumes/manage.sh` to ensure permissions are executable
 - backups may fail if you run out of space / if this is run on a cron to a local folder.
-- backups may fail if you don't have the backup folder. Error may include `Cannot open: No such file or directory tar (child): Error is not recoverable: exiting now`
+- the backup folder is created automatically if it doesn't exist yet.
 
 ## Things to improve
 - Code could be refactored as there are multiple repeating elements
@@ -163,7 +168,7 @@ TBC - useful to run on a schedule to update, backup etc.
 ### Adding script as an alias
 Depending on your system, you could use something like the below to add the script to your path to just type `appmanage` or whatever command you'd like to nickname it to.
 
-`echo "alias appmanage='home/systemadmin/docker_volumes/manage.sh" > ~/.bashrc`
+`echo "alias appmanage='$HOME/docker_volumes/manage.sh'" >> ~/.bashrc`
 
 ### example folder
 The example folder should be deleted once variables are configured.
