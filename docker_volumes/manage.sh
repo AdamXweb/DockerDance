@@ -13,6 +13,9 @@ USERNAME="systemadmin"
 DOCKER_VOLUMES="${DOCKER_VOLUMES:-/home/$USERNAME/docker_volumes/}"
 #Target is the folder within that the tar will save to if running a backup.
 TARGET="${DOCKER_VOLUMES}backup/"
+#Seconds to wait for containers to shut down gracefully before docker gives up
+#(docker's own default of 10s can be too short for busy databases)
+STOP_TIMEOUT="${STOP_TIMEOUT:-30}"
 
 
 #Add styling (only on a terminal that supports it; NO_COLOR=1 disables colour, see no-color.org)
@@ -172,6 +175,23 @@ elapsed() {
   fi
 }
 
+#Per-app results collected during a run, shown as a closing summary
+SUMMARY=""
+record() {
+  SUMMARY="${SUMMARY}$1|$2|$(( $(date +%s) - app_start ))
+"
+}
+print_summary() {
+  if [ -z "$SUMMARY" ] || [ -z "$APP_TOTAL" ] || [ "$APP_TOTAL" -le 1 ]; then
+    return 0
+  fi
+  echo "---"
+  printf '%s' "$SUMMARY" | while IFS='|' read -r s_app s_action s_secs; do
+    [ -z "$s_app" ] && continue
+    printf '  %s%-24s%s %-12s %s%4ss%s\n' "$bold" "$s_app" "$normal" "$s_action" "$dim" "$s_secs" "$normal"
+  done
+}
+
 list_apps() {
   for app in "$@"; do
     echo "$cyan$ARROW$normal $app"
@@ -179,48 +199,73 @@ list_apps() {
   echo "---"
 }
 
+#Pull with docker's own progress bars on a terminal, quietly otherwise
+pull_images() {
+  echo "$(counter)Pulling ${bold}$1${normal} images"
+  if [ -n "$SPINNER" ]; then
+    compose pull
+  else
+    compose pull --quiet
+  fi
+}
+
 start_app() {
+  app_start=$(date +%s)
   enter_app "$1"
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
   ok "$(counter)$1 started"
+  record "$1" "started"
   cd ..
 }
 
 stop_app() {
+  app_start=$(date +%s)
   enter_app "$1"
   #stop (not kill) shuts containers down gracefully so databases can finish writing
-  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop
+  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT"
   ok "$(counter)$1 stopped"
+  record "$1" "stopped"
   cd ..
 }
 
 restart_app() {
+  app_start=$(date +%s)
   enter_app "$1"
-  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop
+  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT"
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
   ok "$(counter)$1 restarted"
+  record "$1" "restarted"
   cd ..
 }
 
 update_app() {
+  app_start=$(date +%s)
   enter_app "$1"
-  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop
-  echo "$(counter)Pulling ${bold}$1${normal} images"
-  compose pull
+  #Pull while the app is still running so downtime is only the stop/start window
+  pull_images "$1"
+  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT"
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
   ok "$(counter)$1 updated and running"
+  record "$1" "updated"
   cd ..
 }
 
 backup_app() {
+  app_start=$(date +%s)
   enter_app "$1"
-  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop
+  #Pull while the app is still running so downtime is only the stop/backup/start window
+  pull_images "$1"
+  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT"
   mkdir -p "$TARGET"
-  run_step "$(counter)Backing up ${bold}$1${normal}" tar -cjf "${TARGET}${1}$(date '+%Y-%m-%d').tar.bz2" "${DOCKER_VOLUMES}${1}"
-  echo "$(counter)Pulling ${bold}$1${normal} images"
-  compose pull
+  archive="${TARGET}${1}$(date '+%Y-%m-%d').tar.bz2"
+  if [ -e "$archive" ]; then
+    warn "${archive##*/} already exists - keeping it and adding a timestamp to this one"
+    archive="${TARGET}${1}$(date '+%Y-%m-%d_%H%M%S').tar.bz2"
+  fi
+  run_step "$(counter)Backing up ${bold}$1${normal}" tar -cjf "$archive" "${DOCKER_VOLUMES}${1}"
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
   ok "$(counter)$1 backed up, updated and running"
+  record "$1" "backed up"
   cd ..
 }
 
@@ -254,6 +299,7 @@ run_command() {
   RUN_START=$(date +%s)
   APP_TOTAL=$#
   APP_NUM=0
+  SUMMARY=""
   case "$menu_command" in
     'backup' )
       checkDefault
@@ -264,6 +310,7 @@ run_command() {
         APP_NUM=$((APP_NUM + 1))
         backup_app "$app"
       done
+      print_summary
       success "Backing up completed in $(elapsed)"
       ;;
     'restore' )
@@ -295,6 +342,7 @@ run_command() {
         APP_NUM=$((APP_NUM + 1))
         update_app "$app"
       done
+      print_summary
       success "Services updated in $(elapsed). Give them a moment to warm up."
       ;;
     'stop' )
@@ -306,6 +354,7 @@ run_command() {
         APP_NUM=$((APP_NUM + 1))
         stop_app "$app"
       done
+      print_summary
       success "Services stopped in $(elapsed)"
       ;;
     'start' )
@@ -317,6 +366,7 @@ run_command() {
         APP_NUM=$((APP_NUM + 1))
         start_app "$app"
       done
+      print_summary
       success "Services started in $(elapsed). Give them a moment to warm up."
       ;;
     'restart' )
@@ -327,6 +377,7 @@ run_command() {
         APP_NUM=$((APP_NUM + 1))
         restart_app "$app"
       done
+      print_summary
       success "Services restarted in $(elapsed). Give them a moment to warm up."
       ;;
     'version' )
@@ -429,7 +480,15 @@ interactive() {
         Apps=$PICKED_APP
       fi
     fi
-    run_command "$choice"
+    #Run in a subshell so one failed command reports and returns to the menu
+    #instead of ending the whole session under set -e
+    set +e
+    ( set -e; trap cleanup EXIT; run_command "$choice" )
+    menu_status=$?
+    set -e
+    if [ "$menu_status" -ne 0 ]; then
+      warn "Command finished with errors (exit $menu_status)"
+    fi
   done
 }
 

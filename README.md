@@ -47,6 +47,7 @@ Docker management can be used as the script itself by downloading with a method 
 `Apps="example"` - Change to the exact wording of each folder within `docker_volumes` e.g. `Apps="linkace .n8n dashy"`
 `USERNAME="systemadmin"` - The user folder that you store the `docker_volumes` in. If you're stuck, type `pwd` to find the path you're in, or `whoami` to get the user name.
 `DOCKER_VOLUMES` defaults to `/home/$USERNAME/docker_volumes/` and can be overwritten in the script, or from the environment without editing anything — handy for MacOS: `DOCKER_VOLUMES="/Users/UserName/docker_volumes/" ./manage.sh start`
+`STOP_TIMEOUT` (default `30`) - seconds to wait for containers to shut down gracefully before docker gives up. Raise it for databases that take a while to flush.
 
 
 ## Commands
@@ -74,7 +75,7 @@ Starts all the apps by navigating through each folder and starting with `docker 
 
 ### Update
 `./manage.sh update`
-Stops all the apps, pulls the latest version and recreates container
+Pulls the latest images **while each app is still running**, then stops and recreates the container — so downtime is just the stop/start window, not the whole download.
 
 ### Restart
 `./manage.sh restart`
