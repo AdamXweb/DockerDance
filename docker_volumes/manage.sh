@@ -1178,14 +1178,19 @@ status_dot() {
 }
 
 pick_app() {
-  #Sets PICKED_APP to one app name, or "" for all apps. Returns 1 if cancelled.
-  PICKED_APP=""
+  #Sets PICKED_APPS to a space-separated list of chosen apps, or "" for all
+  #apps. Returns 1 if the user cancelled or picked nothing valid.
+  PICKED_APPS=""
   if command -v fzf >/dev/null 2>&1; then
     #The preview pane shows live container status for the highlighted app
     fzf_preview='if [ {} = "all apps" ]; then docker ps; else (cd {} && '"$DOCKER_COMPOSE_COMMAND"' ps) 2>/dev/null || echo "(no status)"; fi'
-    PICKED_APP=$(printf '%s\n' "all apps" "$@" | fzf --prompt="app> " --preview "$fzf_preview") || return 1
-    if [ "$PICKED_APP" = "all apps" ]; then
-      PICKED_APP=""
+    pa_sel=$(printf '%s\n' "all apps" "$@" | fzf --multi --prompt="apps (TAB to multi-select)> " --preview "$fzf_preview") || return 1
+    #'all apps' anywhere in the selection means everything
+    if printf '%s\n' "$pa_sel" | grep -qx "all apps"; then
+      PICKED_APPS=""
+    else
+      PICKED_APPS=$(printf '%s' "$pa_sel" | tr '\n' ' ')
+      PICKED_APPS=${PICKED_APPS% }
     fi
     return 0
   fi
@@ -1196,21 +1201,37 @@ pick_app() {
     n=$((n + 1))
     echo "  $n) $(status_dot "$app") $app"
   done
-  printf "Select an app [0-%s]: " "$n"
+  printf "Select app(s) [0-%s, space/comma separated]: " "$n"
   read -r selection || return 1
-  if [ "$selection" = "0" ]; then
-    return 0
-  fi
-  n=0
-  for app in "$@"; do
-    n=$((n + 1))
-    if [ "$n" = "$selection" ]; then
-      PICKED_APP=$app
+  selection=$(printf '%s' "$selection" | tr ',' ' ')
+  pa_out=""
+  # shellcheck disable=SC2086 # selection is an intentionally space-separated list
+  for sel in $selection; do
+    if [ "$sel" = "0" ]; then
+      PICKED_APPS=""
       return 0
     fi
+    n=0
+    hit=""
+    for app in "$@"; do
+      n=$((n + 1))
+      if [ "$n" = "$sel" ]; then
+        hit=$app
+        break
+      fi
+    done
+    if [ -z "$hit" ]; then
+      echo "Not a valid selection: $sel"
+      return 1
+    fi
+    pa_out="$pa_out $hit"
   done
-  echo "Not a valid selection."
-  return 1
+  if [ -z "$pa_out" ]; then
+    echo "Nothing selected."
+    return 1
+  fi
+  PICKED_APPS=${pa_out# }
+  return 0
 }
 
 interactive() {
@@ -1247,8 +1268,8 @@ interactive() {
     if [ "$choice" != "running" ] && [ "$choice" != "status" ] && [ "$choice" != "doctor" ]; then
       # shellcheck disable=SC2086 # Apps is an intentionally space-separated list
       pick_app $Apps || continue
-      if [ -n "$PICKED_APP" ]; then
-        Apps=$PICKED_APP
+      if [ -n "$PICKED_APPS" ]; then
+        Apps=$PICKED_APPS
       fi
     fi
     #Run in a subshell so one failed command reports and returns to the menu

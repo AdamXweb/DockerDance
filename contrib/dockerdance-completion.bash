@@ -5,10 +5,13 @@
 # Completes commands first, then app folder names in the current directory.
 
 _dockerdance() {
-  local cur commands
+  local cur commands flags
   cur=${COMP_WORDS[COMP_CWORD]}
-  commands="start stop restart update backup restore logs version running system-update update-self help"
-  if [ "$COMP_CWORD" -eq 1 ]; then
+  commands="start stop restart update backup restore status logs version running doctor system-update update-self help"
+  flags="--dry-run --yes --no-color --version --help"
+  if [[ "$cur" == -* ]]; then
+    mapfile -t COMPREPLY < <(compgen -W "$flags" -- "$cur")
+  elif [ "$COMP_CWORD" -eq 1 ]; then
     mapfile -t COMPREPLY < <(compgen -W "$commands" -- "$cur")
   else
     # App folders live alongside manage.sh; skip the backup folder itself
