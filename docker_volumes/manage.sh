@@ -104,6 +104,19 @@ notify() {
   return 0
 }
 
+#Ask a yes/no question. --yes answers yes; a non-interactive run (cron) also
+#proceeds so scheduled jobs aren't blocked. Returns non-zero if the user says no.
+confirm() {
+  [ -n "${ASSUME_YES:-}" ] && return 0
+  [ -t 0 ] || return 0
+  printf '%s [y/N] ' "$1"
+  read -r cf_ans || cf_ans=""
+  case "$cf_ans" in
+    y | Y | yes | YES ) return 0 ;;
+    * ) return 1 ;;
+  esac
+}
+
 actioninfo() {
   echo "${bold}${cyan}[action]${normal} $ARROW $1"
 }
@@ -125,6 +138,10 @@ error() {
 run_step() {
   step_label=$1
   shift
+  if [ -n "${DRY_RUN:-}" ]; then
+    echo "${dim}[dry-run]${normal} would: $step_label"
+    return 0
+  fi
   if [ -z "$SPINNER" ]; then
     echo "$step_label"
     "$@"
@@ -543,22 +560,26 @@ backup_app() {
   app_start=$(date +%s)
   enter_app "$1"
   run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT"
-  mkdir -p "$TARGET"
   archive="${TARGET}${1}$(date '+%Y-%m-%d').tar.bz2"
-  if [ -e "$archive" ]; then
-    warn "${archive##*/} already exists - keeping it and adding a timestamp to this one"
-    archive="${TARGET}${1}$(date '+%Y-%m-%d_%H%M%S').tar.bz2"
+  if [ -z "${DRY_RUN:-}" ]; then
+    mkdir -p "$TARGET"
+    if [ -e "$archive" ]; then
+      warn "${archive##*/} already exists - keeping it and adding a timestamp to this one"
+      archive="${TARGET}${1}$(date '+%Y-%m-%d_%H%M%S').tar.bz2"
+    fi
   fi
   #Relative paths inside the archive make restores portable; 600 keeps the
   #.env secrets inside it private
   run_step "$(counter)Backing up ${bold}$1${normal}" tar -C "$DOCKER_VOLUMES" -cjf "$archive" "$1"
-  chmod 600 "$archive"
-  if [ -n "${BACKUP_KEEP:-}" ]; then
-    # shellcheck disable=SC2012 # archive names are script-generated (no spaces/newlines)
-    ls -1t "${TARGET}${1}"[0-9]*.tar.bz2 2>/dev/null | tail -n +"$((BACKUP_KEEP + 1))" | while IFS= read -r old_backup; do
-      rm -f "$old_backup"
-      warn "Pruned old backup ${old_backup##*/} (BACKUP_KEEP=$BACKUP_KEEP)"
-    done
+  if [ -z "${DRY_RUN:-}" ]; then
+    chmod 600 "$archive"
+    if [ -n "${BACKUP_KEEP:-}" ]; then
+      # shellcheck disable=SC2012 # archive names are script-generated (no spaces/newlines)
+      ls -1t "${TARGET}${1}"[0-9]*.tar.bz2 2>/dev/null | tail -n +"$((BACKUP_KEEP + 1))" | while IFS= read -r old_backup; do
+        rm -f "$old_backup"
+        warn "Pruned old backup ${old_backup##*/} (BACKUP_KEEP=$BACKUP_KEEP)"
+      done
+    fi
   fi
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
   wait_healthy "$1" "backed up, updated and running"
@@ -631,16 +652,23 @@ restore_app() {
   fi
 
   echo "$(counter)Restoring ${bold}$1${normal} from ${archive##*/}"
-  if [ -t 0 ]; then
-    printf '%s' "This replaces ${DOCKER_VOLUMES}${1} (current data is set aside, not deleted). Continue? [y/N] "
-    read -r answer || answer=""
-    case "$answer" in
-      y | Y | yes | YES ) ;;
-      * ) echo "Skipped $1."; return 0 ;;
-    esac
-  else
-    error "restore needs a terminal to confirm. Run it interactively."
-    exit 1
+  if [ -n "${DRY_RUN:-}" ]; then
+    echo "${dim}[dry-run]${normal} would replace ${DOCKER_VOLUMES}${1} with the contents of ${archive##*/} (current data set aside)"
+    record "$1" "restored"
+    return 0
+  fi
+  if [ -z "${ASSUME_YES:-}" ]; then
+    if [ -t 0 ]; then
+      printf '%s' "This replaces ${DOCKER_VOLUMES}${1} (current data is set aside, not deleted). Continue? [y/N] "
+      read -r answer || answer=""
+      case "$answer" in
+        y | Y | yes | YES ) ;;
+        * ) echo "Skipped $1."; return 0 ;;
+      esac
+    else
+      error "restore needs a terminal to confirm (or pass --yes). Run it interactively."
+      exit 1
+    fi
   fi
 
   enter_app "$1"
@@ -781,6 +809,11 @@ Commands:
   update-self  Update this script to the latest GitHub release
   help         Show this help (--version shows the script version)
 
+Options:
+  --dry-run    Show what each command would do without touching anything
+  -y, --yes    Don't prompt for confirmation (update / restore)
+  --no-color   Disable coloured output
+
 Commands run against every app in the Apps variable. The default, "auto",
 discovers every folder here that contains a compose file. Pass one or more
 folder names to target specific apps instead, e.g. ./manage.sh restart linkace
@@ -799,7 +832,8 @@ run_command() {
   APP_NUM=0
   SUMMARY=""
   case "$menu_command" in
-    'backup' | 'update' | 'stop' | 'start' | 'restart' | 'restore' ) acquire_lock ;;
+    'backup' | 'update' | 'stop' | 'start' | 'restart' | 'restore' )
+      [ -z "${DRY_RUN:-}" ] && acquire_lock ;;
   esac
   case "$menu_command" in
     'backup' )
@@ -859,6 +893,10 @@ run_command() {
     'update' )
       checkDefault
       require_docker
+      if [ -z "${DRY_RUN:-}" ] && ! confirm "Update $# app(s)? This pulls new images and recreates their containers."; then
+        echo "Cancelled."
+        return 0
+      fi
       NOTIFY_CONTEXT="Update of $*"
       actioninfo "${bold}Updating all services.${normal}"
       list_apps "$@"
@@ -1042,9 +1080,25 @@ interactive() {
   done
 }
 
+#Pull global options out of the arguments (they may appear before or after the
+#command); everything else stays as the command and its app names.
+ASSUME_YES=""
+DRY_RUN=""
+positional=""
+for arg in "$@"; do
+  case "$arg" in
+    -y | --yes ) ASSUME_YES=1 ;;
+    --dry-run ) DRY_RUN=1 ;;
+    --no-color ) bold=""; normal=""; red=""; green=""; yellow=""; cyan=""; dim="" ;;
+    * ) positional="$positional $arg" ;;
+  esac
+done
+# shellcheck disable=SC2086 # app names are space-separated with no embedded spaces
+set -- $positional
+
 APPS_OVERRIDDEN=0
 if [ $# -eq 0 ]; then
-  if [ -t 0 ]; then
+  if [ -t 0 ] && [ -z "$DRY_RUN" ]; then
     #No arguments on a terminal: offer the interactive menu
     interactive
     exit 0
