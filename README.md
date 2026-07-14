@@ -75,7 +75,7 @@ Two options work with any command (before or after it):
 Running the script with no arguments on a terminal opens a menu: pick a command (including `status`, `doctor`, `system-update` and `update-self`), then pick the app(s).
 
 - **With [fzf](https://github.com/junegunn/fzf)** the whole menu is navigable with the **arrow keys** and type-to-filter. On the command list, `Enter` selects and `Esc` quits. On the app list, `TAB` multi-selects (with a live container-status preview pane), `Enter` confirms and `Esc` goes back to the command list.
-- **Without fzf** a numbered menu is shown — type the number *or* the command name; on the app list enter a space/comma-separated list like `1 3` (or `0` for all), and `b` goes back. (Arrow-key navigation needs fzf; a `brew install fzf` / `apt install fzf` is all it takes.)
+- **Without fzf** a numbered menu is shown — type the number *or* the command name; on the app list enter a space/comma-separated list like `1 3` (or `0` for all), and `b` goes back. (Arrow-key navigation needs fzf; a `brew install fzf` / `apt install fzf` .)
 
 No extra dependencies are required either way. Cron and piped usage are unaffected: without a terminal the script prints usage instead of waiting for input.
 
@@ -101,12 +101,12 @@ Stops all the apps, then starts them up again.
 
 ### Backup
 `./manage.sh backup`
-An all-in-one per app: it pulls the latest images **while the app is still running**, stops it gracefully, tars its folder into the `backup` folder, then starts it back up on the new images. Archives are written with `chmod 600` (they contain your `.env` secrets) and store paths relative to `docker_volumes`, so a `restore` is portable. Running twice in one day won't clobber the earlier archive — the second gets a `_HHMMSS` suffix. Set `BACKUP_KEEP=N` to keep only the newest N archives per app.
+An all-in-one per app: it pulls the latest images **while the app is still running**, stops it gracefully, tars its folder into the `backup` folder, then starts it back up on the new images. Archives are written with `chmod 600` (they contain your `.env` secrets) and store paths relative to `docker_volumes`, so a `restore` is portable. A second backup gets a `_HHMMSS` suffix. Set `BACKUP_KEEP=N` to keep only the newest N archives per app.
 
 ### Restore
 `./manage.sh restore linkace`
 
-Puts the newest backup archive for the app back in place: stops the app, moves the current folder aside to `<app>.pre-restore.<timestamp>` (nothing is deleted), extracts the archive, and starts the app again. Asks for confirmation (needs a terminal, or pass `-y`). Older v0.1.0-era archives (absolute paths) are detected and restored too. Archives are treated as untrusted: extraction happens in an isolated staging area, any path-traversal (`..`) member is refused, and only the app's own folder is promoted — a tampered archive can't write elsewhere on disk. Closes issue [#2](https://github.com/AdamXweb/DockerDance/issues/2).
+Puts the newest backup archive for the app back in place: stops the app, moves the current folder aside to `<app>.pre-restore.<timestamp>` (nothing is deleted), extracts the archive, and starts the app again. Asks for confirmation (needs a terminal, or pass `-y`). Older v0.1.0-era archives (absolute paths) are detected and restored too. Archives are treated as untrusted: extraction happens in an isolated staging area, any path-traversal (`..`) member is refused, and only the app's own folder is promoted — a tampered archive can't write elsewhere on disk.
 
 ### Status
 `./manage.sh status`
