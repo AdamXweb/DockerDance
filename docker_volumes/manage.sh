@@ -132,6 +132,30 @@ warn() {
 error() {
   echo "${bold}${red}[error]${normal} - $1" >&2
 }
+hint() {
+  echo "${bold}${cyan}[hint]${normal} - $1" >&2
+}
+
+#Docker's failures can be cryptic. Where the cause is recognisable, add one
+#line saying what to do about it. Anything unrecognised gets no hint - the
+#command's own output above is always the source of truth.
+explain_failure() {
+  [ -s "$1" ] || return 0
+  if grep -q 'no matching manifest for' "$1"; then
+    hint "that image has no build for this machine ($(uname -m)) - check which platforms the image publishes, or pin a tag that covers yours"
+  elif grep -q ': is a directory' "$1"; then
+    hint "something the compose file reads is a directory where a file was expected - a *folder* named compose.yaml/compose.yml beside the real compose file will do this"
+  elif grep -q 'mount source path' "$1" && grep -q 'permission denied' "$1"; then
+    hint "docker couldn't create or reach a bind-mount path on the host - check those volume paths exist and are readable (an external or network drive has to be mounted first)"
+  elif grep -q 'port is already allocated\|address already in use' "$1"; then
+    hint "another container or process already holds that port - free it, or change the published port in the compose file"
+  elif grep -q 'manifest unknown\|not found: manifest\|repository does not exist\|pull access denied\|unauthorized' "$1"; then
+    hint "the image or tag doesn't exist, or it's private - check the name and tag, and 'docker login' first for a private registry"
+  elif grep -q 'no space left on device' "$1"; then
+    hint "the disk is full - 'docker system df' shows what's using it"
+  fi
+  return 0
+}
 
 #Run a command behind a spinner. Output is captured and only shown if the command fails.
 #Without a terminal (cron, pipes) the label is printed and the command runs with plain output.
@@ -142,30 +166,36 @@ run_step() {
     echo "${dim}[dry-run]${normal} would: $step_label"
     return 0
   fi
-  if [ -z "$SPINNER" ]; then
-    echo "$step_label"
-    "$@"
-    return 0
-  fi
-  "$@" >"$STEP_LOG" 2>&1 &
-  step_pid=$!
-  tput civis 2>/dev/null || true
   step_status=0
-  while kill -0 "$step_pid" 2>/dev/null; do
-    # shellcheck disable=SC2086 # frames are an intentionally space-separated list
-    for frame in $SPINNER_FRAMES; do
-      kill -0 "$step_pid" 2>/dev/null || break
-      printf '\r%s%s%s %s' "$cyan" "$frame" "$normal" "$step_label"
-      sleep 0.1 2>/dev/null || sleep 1
+  if [ -z "$SPINNER" ]; then
+    #No terminal: capture rather than stream, so a failure gets the same
+    #labelled report and hint it would get on a terminal
+    echo "$step_label"
+    "$@" >"$STEP_LOG" 2>&1 || step_status=$?
+    #Success still shows what the command said, keeping cron logs detailed;
+    #a failure is printed by the shared branch below instead
+    [ "$step_status" -eq 0 ] && [ -s "$STEP_LOG" ] && sed 's/^/    /' "$STEP_LOG"
+  else
+    "$@" >"$STEP_LOG" 2>&1 &
+    step_pid=$!
+    tput civis 2>/dev/null || true
+    while kill -0 "$step_pid" 2>/dev/null; do
+      # shellcheck disable=SC2086 # frames are an intentionally space-separated list
+      for frame in $SPINNER_FRAMES; do
+        kill -0 "$step_pid" 2>/dev/null || break
+        printf '\r%s%s%s %s' "$cyan" "$frame" "$normal" "$step_label"
+        sleep 0.1 2>/dev/null || sleep 1
+      done
     done
-  done
-  wait "$step_pid" || step_status=$?
-  printf '\r'
-  tput el 2>/dev/null || printf '%-79s\r' ''
-  tput cnorm 2>/dev/null || true
+    wait "$step_pid" || step_status=$?
+    printf '\r'
+    tput el 2>/dev/null || printf '%-79s\r' ''
+    tput cnorm 2>/dev/null || true
+  fi
   if [ "$step_status" -ne 0 ]; then
     error "$step_label failed:"
-    sed 's/^/    /' "$STEP_LOG" >&2
+    [ -s "$STEP_LOG" ] && sed 's/^/    /' "$STEP_LOG" >&2
+    explain_failure "$STEP_LOG"
     rm -f "$STEP_LOG"
     return "$step_status"
   fi
@@ -299,11 +329,13 @@ has_compose_file() {
   [ -f "$1/docker-compose.yml" ] || [ -f "$1/docker-compose.yaml" ] || [ -f "$1/compose.yml" ] || [ -f "$1/compose.yaml" ]
 }
 
+#Returns non-zero rather than exiting, so one unusable app folder is reported
+#and skipped instead of ending a run over the other apps.
 enter_app() {
   APP_RETURN_DIR=$(pwd)
   if [ ! -d "$1" ]; then
     error "No folder named '$1' here. Run this from the docker_volumes folder and check the Apps variable / arguments."
-    exit 1
+    return 1
   fi
   cd "$1"
   if has_compose_file .; then
@@ -328,7 +360,8 @@ enter_app() {
   else
     error "No compose file found in '$1' (or one level below it)."
   fi
-  exit 1
+  leave_app
+  return 1
 }
 
 leave_app() {
@@ -403,8 +436,86 @@ print_summary() {
   echo "---"
   printf '%s' "$SUMMARY" | while IFS='|' read -r s_app s_action s_secs; do
     [ -z "$s_app" ] && continue
-    printf '  %s%-24s%s %-12s %s%4ss%s\n' "$bold" "$s_app" "$normal" "$s_action" "$dim" "$s_secs" "$normal"
+    case "$s_action" in
+      failed )  s_mark="$red$DOT_OFF$normal" ;;
+      skipped ) s_mark="$yellow$DOT_OFF$normal" ;;
+      * )       s_mark="$green$DOT_ON$normal" ;;
+    esac
+    printf '  %s %s%-24s%s %-12s %s%4ss%s\n' "$s_mark" "$bold" "$s_app" "$normal" "$s_action" "$dim" "$s_secs" "$normal"
   done
+}
+
+#Apps that couldn't be completed this run. A broken app is reported and the
+#run carries on through the rest - the closing tally and the exit status say
+#what went wrong, rather than the run stopping dead on the first failure.
+RUN_FAILED=""
+RUN_SKIPPED=""
+RUN_RESULT=""
+#$2 is the step that failed, used for the summary row
+fail_app() {
+  RUN_FAILED="$RUN_FAILED $1"
+  record "$1" "failed"
+  #The app function returns as soon as a step fails, so put the shell back in
+  #the docker_volumes folder for the next app
+  leave_app
+  return 0
+}
+skip_app() {
+  RUN_SKIPPED="$RUN_SKIPPED $1"
+  app_start=$(date +%s)
+  warn "$(counter)Skipping $1 ($2)"
+  record "$1" "skipped"
+  return 0
+}
+
+#Count the words in a space-separated list into COUNTED
+COUNTED=0
+count_list() {
+  COUNTED=0
+  # shellcheck disable=SC2086,SC2034 # a space-separated list; the loop counts, it doesn't read cl_x
+  for cl_x in $1; do
+    COUNTED=$((COUNTED + 1))
+  done
+}
+
+#Space-separated list to "a, b, c" for reading
+join_list() {
+  jl_out=""
+  # shellcheck disable=SC2086 # $1 is an intentionally space-separated list
+  for jl_x in $1; do
+    jl_out="${jl_out:+$jl_out, }$jl_x"
+  done
+  printf '%s' "$jl_out"
+}
+
+#Closing report for a run: the per-app table, then a plain-language tally of
+#how many apps actually made it. Returns non-zero when anything failed or was
+#skipped, so cron and scripts can tell without reading the output. $1 is the
+#past-tense verb ("Updated"), $2 an optional note shown when all went well.
+finish_run() {
+  print_summary
+  count_list "$RUN_FAILED";  fr_failed=$COUNTED
+  count_list "$RUN_SKIPPED"; fr_skipped=$COUNTED
+  fr_done=$((APP_TOTAL - fr_failed - fr_skipped))
+  fr_word="apps"
+  [ "$APP_TOTAL" -eq 1 ] && fr_word="app"
+  if [ "$fr_failed" -eq 0 ] && [ "$fr_skipped" -eq 0 ]; then
+    if [ "$APP_TOTAL" -eq 1 ]; then
+      RUN_RESULT="$1 1 app in $(elapsed)"
+    else
+      RUN_RESULT="$1 all $APP_TOTAL apps in $(elapsed)"
+    fi
+    success "$RUN_RESULT.${2:+ $2}"
+    return 0
+  fi
+  fr_note=""
+  [ "$fr_failed" -gt 0 ]  && fr_note="$fr_failed failed"
+  [ "$fr_skipped" -gt 0 ] && fr_note="${fr_note:+$fr_note, }$fr_skipped skipped"
+  RUN_RESULT="$1 $fr_done of $APP_TOTAL $fr_word in $(elapsed) - $fr_note"
+  warn "$RUN_RESULT"
+  [ "$fr_failed" -gt 0 ]  && echo "  ${red}failed:${normal}  $(join_list "$RUN_FAILED")" >&2
+  [ "$fr_skipped" -gt 0 ] && echo "  ${yellow}skipped:${normal} $(join_list "$RUN_SKIPPED")" >&2
+  return 1
 }
 
 list_apps() {
@@ -570,10 +681,11 @@ parallel_pull() {
     pp_fails=$((pp_fails + 1))
     warn "Pull failed for $pp_app - leaving it on its current image"
     [ -s "$pp_dir/$pp_app.log" ] && sed 's/^/    /' "$pp_dir/$pp_app.log" >&2
+    explain_failure "$pp_dir/$pp_app.log"
   done
   pp_took=$(human_secs $(( $(date +%s) - pp_start )))
   if [ "$pp_fails" -gt 0 ]; then
-    warn "Pulled $((pp_total - pp_fails))/$pp_total app(s) in $pp_took - $pp_fails failed"
+    warn "Pulled $((pp_total - pp_fails)) of $pp_total app(s) in $pp_took - $pp_fails failed: $(join_list "$PULL_FAILED")"
   else
     ok "Pulled images for $pp_total app(s) in $pp_took"
   fi
@@ -654,10 +766,12 @@ wait_healthy() {
   return 0
 }
 
+#Each step is guarded rather than left to `set -e`: a failure returns here so
+#the caller can record this app and move on to the next one.
 start_app() {
   app_start=$(date +%s)
-  enter_app "$1"
-  run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
+  enter_app "$1" || return 1
+  run_step "$(counter)Starting ${bold}$1${normal}" compose up -d || return 1
   wait_healthy "$1" "started"
   record "$1" "started"
   leave_app
@@ -665,9 +779,9 @@ start_app() {
 
 stop_app() {
   app_start=$(date +%s)
-  enter_app "$1"
+  enter_app "$1" || return 1
   #stop (not kill) shuts containers down gracefully so databases can finish writing
-  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT"
+  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT" || return 1
   ok "$(counter)$1 stopped"
   record "$1" "stopped"
   leave_app
@@ -675,9 +789,9 @@ stop_app() {
 
 restart_app() {
   app_start=$(date +%s)
-  enter_app "$1"
-  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT"
-  run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
+  enter_app "$1" || return 1
+  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT" || return 1
+  run_step "$(counter)Starting ${bold}$1${normal}" compose up -d || return 1
   wait_healthy "$1" "restarted"
   record "$1" "restarted"
   leave_app
@@ -687,9 +801,9 @@ restart_app() {
 #the app onto the new image with minimal downtime.
 update_app() {
   app_start=$(date +%s)
-  enter_app "$1"
-  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT"
-  run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
+  enter_app "$1" || return 1
+  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT" || return 1
+  run_step "$(counter)Starting ${bold}$1${normal}" compose up -d || return 1
   wait_healthy "$1" "updated and running"
   record "$1" "updated"
   leave_app
@@ -699,8 +813,8 @@ update_app() {
 #and starts the app back on the new image.
 backup_app() {
   app_start=$(date +%s)
-  enter_app "$1"
-  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT"
+  enter_app "$1" || return 1
+  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT" || return 1
   archive="${TARGET}${1}$(date '+%Y-%m-%d').tar.bz2"
   if [ -z "${DRY_RUN:-}" ]; then
     mkdir -p "$TARGET"
@@ -711,8 +825,9 @@ backup_app() {
   fi
   #Relative paths inside the archive make restores portable; 600 keeps the
   #.env secrets inside it private
-  run_step "$(counter)Backing up ${bold}$1${normal}" tar -C "$DOCKER_VOLUMES" -cjf "$archive" "$1"
-  if [ -z "${DRY_RUN:-}" ]; then
+  archive_status=0
+  run_step "$(counter)Backing up ${bold}$1${normal}" tar -C "$DOCKER_VOLUMES" -cjf "$archive" "$1" || archive_status=1
+  if [ "$archive_status" -eq 0 ] && [ -z "${DRY_RUN:-}" ]; then
     chmod 600 "$archive"
     if [ -n "${BACKUP_KEEP:-}" ]; then
       # shellcheck disable=SC2012 # archive names are script-generated (no spaces/newlines)
@@ -722,7 +837,14 @@ backup_app() {
       done
     fi
   fi
-  run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
+  #Start the app again even when the archive failed - a bad backup mustn't
+  #leave the app sitting stopped
+  run_step "$(counter)Starting ${bold}$1${normal}" compose up -d || return 1
+  if [ "$archive_status" -ne 0 ]; then
+    rm -f "$archive"
+    warn "$(counter)$1 is running again, but it has no new backup"
+    return 1
+  fi
   wait_healthy "$1" "backed up, updated and running"
   record "$1" "backed up"
   leave_app
@@ -746,7 +868,7 @@ restore_app() {
   archive=$(ls -1t "${TARGET}${1}"[0-9]*.tar.bz2 2>/dev/null | head -1)
   if [ -z "$archive" ]; then
     error "No backups found for '$1' in $TARGET"
-    exit 1
+    return 1
   fi
   #Which layout is inside? New backups hold '<app>/...'; older (v0.1.0-era)
   #ones held absolute paths like '/home/x/docker_volumes/<app>/...'. Work out how many
@@ -762,14 +884,14 @@ restore_app() {
       layout="legacy" ;;
     * )
       error "Unrecognised layout in ${archive##*/} - restore it manually with tar."
-      exit 1 ;;
+      return 1 ;;
   esac
   #Legacy absolute archives rely on GNU/bsdtar stripping the leading '/';
   #busybox tar does not, so refuse that one combination rather than risk a
   #write outside the staging dir.
   if [ "$layout" = "legacy" ] && tar_is_busybox; then
     error "${archive##*/} is a legacy absolute-path backup and your tar is busybox, which can't extract it safely. Restore it on a host with GNU tar."
-    exit 1
+    return 1
   fi
   #Reject any member with a '..' component (all layouts) or an absolute path
   #(relative layout only - legacy members are absolute by design and stripped).
@@ -789,7 +911,7 @@ restore_app() {
   rm -f "$member_list"
   if [ -n "$bad_member" ]; then
     error "Refusing to restore ${archive##*/}: unsafe path in archive ('$bad_member')."
-    exit 1
+    return 1
   fi
 
   echo "$(counter)Restoring ${bold}$1${normal} from ${archive##*/}"
@@ -804,7 +926,7 @@ restore_app() {
       read -r answer || answer=""
       case "$answer" in
         y | Y | yes | YES ) ;;
-        * ) echo "Skipped $1."; return 0 ;;
+        * ) skip_app "$1" "you declined"; return 0 ;;
       esac
     else
       error "restore needs a terminal to confirm (or pass --yes). Run it interactively."
@@ -812,14 +934,14 @@ restore_app() {
     fi
   fi
 
-  enter_app "$1"
-  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT"
+  enter_app "$1" || return 1
+  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT" || return 1
   leave_app
 
   #Stage under backup/ (same filesystem as the app folders, so the promote is
   #an atomic rename) and extract there - never onto the host root.
   mkdir -p "$TARGET"
-  staging=$(mktemp -d "${TARGET}restore.XXXXXX") || { error "Couldn't create a staging dir in $TARGET"; exit 1; }
+  staging=$(mktemp -d "${TARGET}restore.XXXXXX") || { error "Couldn't create a staging dir in $TARGET"; return 1; }
   aside="${DOCKER_VOLUMES}${1}.pre-restore.$(date '+%Y%m%d%H%M%S')"
   mv "${DOCKER_VOLUMES}${1}" "$aside"
   extract_ok=1
@@ -833,13 +955,13 @@ restore_app() {
     rm -rf "$staging"
     [ -e "${DOCKER_VOLUMES}${1}" ] || mv "$aside" "${DOCKER_VOLUMES}${1}"
     error "Restore failed - the original data was put back."
-    exit 1
+    return 1
   fi
   mv "$staging/$1" "${DOCKER_VOLUMES}${1}"
   rm -rf "$staging"
 
-  enter_app "$1"
-  run_step "$(counter)Starting ${bold}$1${normal}" compose up -d
+  enter_app "$1" || return 1
+  run_step "$(counter)Starting ${bold}$1${normal}" compose up -d || return 1
   wait_healthy "$1" ""
   leave_app
   ok "$(counter)$1 restored. Previous data kept at ${aside##*/} - delete it once you're happy"
@@ -1121,6 +1243,10 @@ run_command() {
   APP_TOTAL=$#
   APP_NUM=0
   SUMMARY=""
+  RUN_FAILED=""
+  RUN_SKIPPED=""
+  RUN_RESULT=""
+  run_status=0
   case "$menu_command" in
     'backup' | 'update' | 'stop' | 'start' | 'restart' | 'restore' )
       [ -z "${DRY_RUN:-}" ] && acquire_lock ;;
@@ -1136,16 +1262,13 @@ run_command() {
       for app in "$@"; do
         APP_NUM=$((APP_NUM + 1))
         if in_list "$app" "$PULL_FAILED"; then
-          app_start=$(date +%s)
-          warn "$(counter)Skipping $app (its pull failed)"
-          record "$app" "skipped"
+          skip_app "$app" "its pull failed"
           continue
         fi
-        backup_app "$app"
+        backup_app "$app" || fail_app "$app"
       done
-      print_summary
-      success "Backing up completed in $(elapsed)"
-      notify "Backup of $* completed in $(elapsed)"
+      finish_run "Backed up" || run_status=1
+      notify "Backup of $*: $RUN_RESULT"
       NOTIFY_CONTEXT=""
       ;;
     'restore' )
@@ -1156,11 +1279,10 @@ run_command() {
       list_apps "$@"
       for app in "$@"; do
         APP_NUM=$((APP_NUM + 1))
-        restore_app "$app"
+        restore_app "$app" || fail_app "$app"
       done
-      print_summary
-      success "Restore completed in $(elapsed)"
-      notify "Restore of $* completed in $(elapsed)"
+      finish_run "Restored" || run_status=1
+      notify "Restore of $*: $RUN_RESULT"
       NOTIFY_CONTEXT=""
       ;;
     'logs' )
@@ -1168,13 +1290,13 @@ run_command() {
       require_docker
       if [ $# -eq 1 ]; then
         echo "Following ${bold}$1${normal} logs (Ctrl-C to stop)"
-        enter_app "$1"
+        enter_app "$1" || return 1
         compose logs -f
         leave_app
       else
         for app in "$@"; do
           echo "Getting ${bold}$app${normal} logs"
-          enter_app "$app"
+          enter_app "$app" || continue
           compose logs --tail=20
           leave_app
         done
@@ -1194,16 +1316,13 @@ run_command() {
       for app in "$@"; do
         APP_NUM=$((APP_NUM + 1))
         if in_list "$app" "$PULL_FAILED"; then
-          app_start=$(date +%s)
-          warn "$(counter)Skipping $app (its pull failed)"
-          record "$app" "skipped"
+          skip_app "$app" "its pull failed"
           continue
         fi
-        update_app "$app"
+        update_app "$app" || fail_app "$app"
       done
-      print_summary
-      success "Services updated in $(elapsed)."
-      notify "Update of $* completed in $(elapsed)"
+      finish_run "Updated" || run_status=1
+      notify "Update of $*: $RUN_RESULT"
       NOTIFY_CONTEXT=""
       ;;
     'stop' )
@@ -1213,10 +1332,9 @@ run_command() {
       list_apps "$@"
       for app in "$@"; do
         APP_NUM=$((APP_NUM + 1))
-        stop_app "$app"
+        stop_app "$app" || fail_app "$app"
       done
-      print_summary
-      success "Services stopped in $(elapsed)"
+      finish_run "Stopped" || run_status=1
       ;;
     'start' )
       checkDefault
@@ -1225,10 +1343,9 @@ run_command() {
       list_apps "$@"
       for app in "$@"; do
         APP_NUM=$((APP_NUM + 1))
-        start_app "$app"
+        start_app "$app" || fail_app "$app"
       done
-      print_summary
-      success "Services started in $(elapsed). Give them a moment to warm up."
+      finish_run "Started" "Give them a moment to warm up." || run_status=1
       ;;
     'restart' )
       checkDefault
@@ -1236,17 +1353,16 @@ run_command() {
       actioninfo "${bold}Restarting${normal} all services"
       for app in "$@"; do
         APP_NUM=$((APP_NUM + 1))
-        restart_app "$app"
+        restart_app "$app" || fail_app "$app"
       done
-      print_summary
-      success "Services restarted in $(elapsed). Give them a moment to warm up."
+      finish_run "Restarted" "Give them a moment to warm up." || run_status=1
       ;;
     'version' )
       checkDefault
       require_docker
       for app in "$@"; do
         echo "Getting ${bold}$app${normal} version"
-        enter_app "$app"
+        enter_app "$app" || continue
         compose images
         leave_app
       done
@@ -1282,6 +1398,9 @@ run_command() {
       exit 1
       ;;
   esac
+  #Non-zero when any app failed or was skipped, so cron and scripts can tell
+  #without parsing the output
+  return "$run_status"
 }
 
 #Green dot when a container whose compose project matches the app folder is up.
