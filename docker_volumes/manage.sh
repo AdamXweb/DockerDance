@@ -391,6 +391,122 @@ resolve_dir() {
   return 1
 }
 
+#What update/backup do with an app that is already stopped:
+#  keep  - bring its new image down but leave the app stopped (the default:
+#          an app you deliberately stopped shouldn't come back up on its own)
+#  start - update it and start it, so everything ends up running
+#  skip  - don't touch it at all, not even a pull
+#Set when the choice came from --stopped, manage.conf or the environment, so
+#the interactive prompt doesn't second-guess a preference already expressed
+STOPPED_SET=""
+[ -n "${STOPPED_POLICY:-}" ] && STOPPED_SET=1
+STOPPED_POLICY="${STOPPED_POLICY:-keep}"
+valid_stopped_policy() {
+  case "$1" in
+    keep | start | skip ) return 0 ;;
+    * ) return 1 ;;
+  esac
+}
+
+#Every running container id, fetched once so the state scan below costs one
+#docker call plus a compose ps per app, rather than an inspect per container.
+RUNNING_IDS=""
+load_running_ids() {
+  RUNNING_IDS=$(docker ps -q --no-trunc 2>/dev/null || true)
+}
+
+#True when at least one of the app's containers is running right now
+app_is_up() {
+  ai_dir=$(resolve_dir "$1") || return 1
+  ai_ids=$(cd "$ai_dir" && compose ps -q 2>/dev/null) || return 1
+  [ -n "$ai_ids" ] || return 1
+  # shellcheck disable=SC2086 # ids are one per line with no spaces
+  for ai_id in $ai_ids; do
+    printf '%s\n' "$RUNNING_IDS" | grep -qx "$ai_id" && return 0
+  done
+  return 1
+}
+
+#Split the apps into APPS_UP / APPS_DOWN before anything is changed, so the
+#run can put each one back the way it found it.
+APPS_UP=""
+APPS_DOWN=""
+scan_state() {
+  APPS_UP=""
+  APPS_DOWN=""
+  #Read-only, so it runs for --dry-run too and reports the real state
+  load_running_ids
+  for sc_app in "$@"; do
+    if app_is_up "$sc_app"; then
+      APPS_UP="$APPS_UP $sc_app"
+    else
+      APPS_DOWN="$APPS_DOWN $sc_app"
+    fi
+  done
+  APPS_UP=${APPS_UP# }
+  APPS_DOWN=${APPS_DOWN# }
+}
+
+#Show what's running before anything is touched - the state half of "see the
+#state, then put it back".
+print_state() {
+  count_list "$APPS_UP";   ps_up=$COUNTED
+  count_list "$APPS_DOWN"; ps_down=$COUNTED
+  [ "$ps_up" -gt 0 ]   && echo "  ${green}${DOT_ON}${normal} $ps_up running: $(join_list "$APPS_UP")"
+  [ "$ps_down" -gt 0 ] && echo "  ${dim}${DOT_OFF}${normal} $ps_down stopped: $(join_list "$APPS_DOWN")"
+  return 0
+}
+
+#Settle what happens to any stopped apps and, for commands that ask before
+#acting, confirm the run - one prompt does both jobs. $1 is the verb, $2 the
+#explanation for the plain y/N form, $3 is "always" to confirm even when
+#nothing is stopped (update does; backup never has), then the apps. Returns
+#non-zero if the user backs out. Without a terminal (or with -y / --stopped)
+#STOPPED_POLICY is taken as given and nothing is asked.
+confirm_run() {
+  cr_verb=$1
+  cr_detail=$2
+  cr_always=$3
+  shift 3
+  count_list "$APPS_DOWN"; cr_down=$COUNTED
+  if [ "$cr_down" -eq 0 ]; then
+    [ "$cr_always" = "always" ] || return 0
+    confirm "$cr_verb $# app(s)? $cr_detail" || return 1
+    return 0
+  fi
+  if [ -n "${ASSUME_YES:-}" ] || [ -n "$STOPPED_SET" ] || [ ! -t 0 ]; then
+    return 0
+  fi
+  count_list "$APPS_UP"; cr_up=$COUNTED
+  echo "$cr_verb $cr_up running app(s). The other $cr_down are stopped - what should happen to them?"
+  echo "  1) leave them stopped, but pull so they're current next start ${dim}(recommended)${normal}"
+  echo "  2) start them too, so everything ends up running"
+  echo "  3) skip them entirely - no pull, no changes"
+  echo "  n) cancel"
+  printf 'Choose [1]: '
+  read -r cr_ans || cr_ans=""
+  case "$cr_ans" in
+    '' | 1 | keep )  STOPPED_POLICY="keep" ;;
+    2 | start )      STOPPED_POLICY="start" ;;
+    3 | skip )       STOPPED_POLICY="skip" ;;
+    * )              return 1 ;;
+  esac
+  return 0
+}
+
+#The apps worth pulling images for: everything, minus the stopped ones when
+#the policy is to leave those completely alone.
+pull_target_list() {
+  pt_out=""
+  for pt_app in "$@"; do
+    if [ "$STOPPED_POLICY" = "skip" ] && in_list "$pt_app" "$APPS_DOWN"; then
+      continue
+    fi
+    pt_out="$pt_out $pt_app"
+  done
+  printf '%s' "${pt_out# }"
+}
+
 #Is $1 one of the space-separated words in $2?
 in_list() {
   # shellcheck disable=SC2086 # $2 is an intentionally space-separated list
@@ -450,6 +566,7 @@ print_summary() {
 #what went wrong, rather than the run stopping dead on the first failure.
 RUN_FAILED=""
 RUN_SKIPPED=""
+RUN_KEPT=""
 RUN_RESULT=""
 #$2 is the step that failed, used for the summary row
 fail_app() {
@@ -465,6 +582,21 @@ skip_app() {
   app_start=$(date +%s)
   warn "$(counter)Skipping $1 ($2)"
   record "$1" "skipped"
+  return 0
+}
+
+#The app was already stopped and the policy is to leave it that way. Its new
+#image has been pulled, and compose recreates a stopped container on the new
+#image the next time the app is started, so there's nothing else to do.
+keep_stopped_app() {
+  RUN_KEPT="$RUN_KEPT $1"
+  app_start=$(date +%s)
+  if [ -n "${DRY_RUN:-}" ]; then
+    echo "${dim}[dry-run]${normal} would leave ${bold}$1${normal} stopped, with its new image pulled and ready"
+  else
+    ok "$(counter)$1 left stopped - new image ready for its next start"
+  fi
+  record "$1" "image ready"
   return 0
 }
 
@@ -496,14 +628,18 @@ finish_run() {
   print_summary
   count_list "$RUN_FAILED";  fr_failed=$COUNTED
   count_list "$RUN_SKIPPED"; fr_skipped=$COUNTED
+  count_list "$RUN_KEPT";    fr_kept=$COUNTED
+  #Apps left stopped on purpose were handled as asked, so they count as done
   fr_done=$((APP_TOTAL - fr_failed - fr_skipped))
   fr_word="apps"
   [ "$APP_TOTAL" -eq 1 ] && fr_word="app"
+  fr_kept_note=""
+  [ "$fr_kept" -gt 0 ] && fr_kept_note=" ($fr_kept left stopped)"
   if [ "$fr_failed" -eq 0 ] && [ "$fr_skipped" -eq 0 ]; then
     if [ "$APP_TOTAL" -eq 1 ]; then
-      RUN_RESULT="$1 1 app in $(elapsed)"
+      RUN_RESULT="$1 1 app in $(elapsed)$fr_kept_note"
     else
-      RUN_RESULT="$1 all $APP_TOTAL apps in $(elapsed)"
+      RUN_RESULT="$1 all $APP_TOTAL apps in $(elapsed)$fr_kept_note"
     fi
     success "$RUN_RESULT.${2:+ $2}"
     return 0
@@ -511,7 +647,7 @@ finish_run() {
   fr_note=""
   [ "$fr_failed" -gt 0 ]  && fr_note="$fr_failed failed"
   [ "$fr_skipped" -gt 0 ] && fr_note="${fr_note:+$fr_note, }$fr_skipped skipped"
-  RUN_RESULT="$1 $fr_done of $APP_TOTAL $fr_word in $(elapsed) - $fr_note"
+  RUN_RESULT="$1 $fr_done of $APP_TOTAL $fr_word in $(elapsed) - $fr_note$fr_kept_note"
   warn "$RUN_RESULT"
   [ "$fr_failed" -gt 0 ]  && echo "  ${red}failed:${normal}  $(join_list "$RUN_FAILED")" >&2
   [ "$fr_skipped" -gt 0 ] && echo "  ${yellow}skipped:${normal} $(join_list "$RUN_SKIPPED")" >&2
@@ -814,7 +950,16 @@ update_app() {
 backup_app() {
   app_start=$(date +%s)
   enter_app "$1" || return 1
-  run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT" || return 1
+  #An app that was already stopped is archived where it lies and left that way
+  #(unless the policy says to start everything), so a backup doesn't quietly
+  #bring up something that was deliberately down.
+  was_up=0
+  if in_list "$1" "$APPS_UP" || [ "$STOPPED_POLICY" = "start" ]; then
+    was_up=1
+  fi
+  if [ "$was_up" -eq 1 ] && in_list "$1" "$APPS_UP"; then
+    run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT" || return 1
+  fi
   archive="${TARGET}${1}$(date '+%Y-%m-%d').tar.bz2"
   if [ -z "${DRY_RUN:-}" ]; then
     mkdir -p "$TARGET"
@@ -837,16 +982,25 @@ backup_app() {
       done
     fi
   fi
-  #Start the app again even when the archive failed - a bad backup mustn't
-  #leave the app sitting stopped
-  run_step "$(counter)Starting ${bold}$1${normal}" compose up -d || return 1
+  #Put the app back the way it was found. Starting happens even when the
+  #archive failed - a bad backup mustn't leave a running app stopped.
+  if [ "$was_up" -eq 1 ]; then
+    run_step "$(counter)Starting ${bold}$1${normal}" compose up -d || return 1
+  fi
   if [ "$archive_status" -ne 0 ]; then
     rm -f "$archive"
-    warn "$(counter)$1 is running again, but it has no new backup"
+    warn "$(counter)$1 is back as it was, but it has no new backup"
     return 1
   fi
-  wait_healthy "$1" "backed up, updated and running"
-  record "$1" "backed up"
+  if [ "$was_up" -eq 1 ]; then
+    wait_healthy "$1" "backed up, updated and running"
+    record "$1" "backed up"
+  else
+    #wait_healthy would normally carry this line, but there's nothing to wait for
+    [ -z "${DRY_RUN:-}" ] && ok "$(counter)$1 backed up, left stopped"
+    RUN_KEPT="$RUN_KEPT $1"
+    record "$1" "backed up"
+  fi
   leave_app
 }
 
@@ -1224,6 +1378,9 @@ Commands:
 Options:
   --dry-run    Show what each command would do without touching anything
   -y, --yes    Don't prompt for confirmation (update / restore)
+  --stopped=X  What update/backup do with apps that are already stopped:
+               keep (default) leaves them stopped with their new image ready,
+               start brings them up too, skip leaves them entirely alone
   --no-color   Disable coloured output
 
 Commands run against every app in the Apps variable. The default, "auto",
@@ -1245,6 +1402,7 @@ run_command() {
   SUMMARY=""
   RUN_FAILED=""
   RUN_SKIPPED=""
+  RUN_KEPT=""
   RUN_RESULT=""
   run_status=0
   case "$menu_command" in
@@ -1258,9 +1416,21 @@ run_command() {
       NOTIFY_CONTEXT="Backup of $*"
       actioninfo "${bold}Backing up${normal} apps including:"
       list_apps "$@"
-      parallel_pull "$@"
+      scan_state "$@"
+      print_state
+      if [ -z "${DRY_RUN:-}" ] && ! confirm_run "Back up" "" stopped-only "$@"; then
+        echo "Cancelled."
+        return 0
+      fi
+      pull_targets=$(pull_target_list "$@")
+      # shellcheck disable=SC2086 # app names are space-separated with no embedded spaces
+      parallel_pull $pull_targets
       for app in "$@"; do
         APP_NUM=$((APP_NUM + 1))
+        if [ "$STOPPED_POLICY" = "skip" ] && in_list "$app" "$APPS_DOWN"; then
+          skip_app "$app" "it's stopped"
+          continue
+        fi
         if in_list "$app" "$PULL_FAILED"; then
           skip_app "$app" "its pull failed"
           continue
@@ -1305,18 +1475,30 @@ run_command() {
     'update' )
       checkDefault
       require_docker
-      if [ -z "${DRY_RUN:-}" ] && ! confirm "Update $# app(s)? This pulls new images and recreates their containers."; then
+      NOTIFY_CONTEXT="Update of $*"
+      actioninfo "${bold}Updating${normal} apps:"
+      list_apps "$@"
+      scan_state "$@"
+      print_state
+      if [ -z "${DRY_RUN:-}" ] && ! confirm_run "Update" "This pulls new images and recreates their containers." always "$@"; then
         echo "Cancelled."
         return 0
       fi
-      NOTIFY_CONTEXT="Update of $*"
-      actioninfo "${bold}Updating all services.${normal}"
-      list_apps "$@"
-      parallel_pull "$@"
+      pull_targets=$(pull_target_list "$@")
+      # shellcheck disable=SC2086 # app names are space-separated with no embedded spaces
+      parallel_pull $pull_targets
       for app in "$@"; do
         APP_NUM=$((APP_NUM + 1))
+        if [ "$STOPPED_POLICY" = "skip" ] && in_list "$app" "$APPS_DOWN"; then
+          skip_app "$app" "it's stopped"
+          continue
+        fi
         if in_list "$app" "$PULL_FAILED"; then
           skip_app "$app" "its pull failed"
+          continue
+        fi
+        if [ "$STOPPED_POLICY" = "keep" ] && in_list "$app" "$APPS_DOWN"; then
+          keep_stopped_app "$app"
           continue
         fi
         update_app "$app" || fail_app "$app"
@@ -1565,10 +1747,15 @@ for arg in "$@"; do
   case "$arg" in
     -y | --yes ) ASSUME_YES=1 ;;
     --dry-run ) DRY_RUN=1 ;;
+    --stopped=* ) STOPPED_POLICY=${arg#--stopped=}; STOPPED_SET=1 ;;
     --no-color ) bold=""; normal=""; red=""; green=""; yellow=""; cyan=""; dim="" ;;
     * ) positional="$positional $arg" ;;
   esac
 done
+if ! valid_stopped_policy "$STOPPED_POLICY"; then
+  error "--stopped must be one of: keep, start, skip (got '$STOPPED_POLICY')"
+  exit 1
+fi
 # shellcheck disable=SC2086 # app names are space-separated with no embedded spaces
 set -- $positional
 

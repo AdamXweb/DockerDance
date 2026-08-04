@@ -46,6 +46,7 @@ Then run `./manage.sh` for the interactive menu, or `./manage.sh help` for the c
 To pin the set or the order instead, list the folders explicitly e.g. `Apps="linkace .n8n dashy"`
 `USERNAME="systemadmin"` - The user folder that you store the `docker_volumes` in. If you're stuck, type `pwd` to find the path you're in, or `whoami` to get the user name.
 `DOCKER_VOLUMES` defaults to `/home/$USERNAME/docker_volumes/` and can be overwritten in the script, or from the environment without editing anything — handy for MacOS: `DOCKER_VOLUMES="/Users/UserName/docker_volumes/" ./manage.sh start`
+`STOPPED_POLICY` (default `keep`) - what `update`/`backup` do with apps that are already stopped: `keep` leaves them stopped with their new image ready, `start` brings them up too, `skip` leaves them entirely alone. Same values as `--stopped=`.
 `STOP_TIMEOUT` (default `30`) - seconds to wait for containers to shut down gracefully before docker gives up. Raise it for databases that take a while to flush.
 `HEALTH_TIMEOUT` (default `60`) - after starting an app, seconds to wait for its containers to become healthy (or just running, if they have no healthcheck) before moving on. Set `0` to skip the wait entirely.
 `PARALLEL_PULLS` (default `3`) - how many image pulls `update`/`backup` keep in flight at once; as each one finishes the next app starts straight away. Set `1` for the old one-at-a-time behaviour.
@@ -64,9 +65,10 @@ First, make sure you are in the `docker_volumes` folder, and execute any of the 
 
 Every command runs against all the apps in the `Apps` variable by default. To target one or more specific apps, add their folder names after the command, e.g. `./manage.sh restart linkace` or `./manage.sh update linkace uptime-kuma`.
 
-Two options work with any command (before or after it):
+Options that work with any command (before or after it):
 - `--dry-run` prints exactly what would happen — which apps get pulled, stopped, backed up, started — without touching anything.
 - `-y` / `--yes` skips confirmation prompts (so `update` and `restore` can run unattended).
+- `--stopped=keep|start|skip` decides what `update` and `backup` do with apps that are already stopped — see [Keeping apps as you found them](#keeping-apps-as-you-found-them).
 - `--no-color` turns off coloured output (as does setting `NO_COLOR`).
 
 ### Interactive menu
@@ -93,7 +95,7 @@ Starts all the apps by navigating through each folder and starting with `docker 
 
 ### Update
 `./manage.sh update`
-Pulls the latest images for all target apps **in parallel** (keeping `PARALLEL_PULLS` downloads in flight), then stops and recreates each container on the new image — so downtime is just the stop/start window, not the download. The pull phase names the apps it's downloading and counts them off, printing a line per app as it lands, so a long pull across many apps shows progress rather than a silent spinner. On a terminal it asks for confirmation first (skip with `-y`); an app whose pull fails is left running on its current image and reported. After starting, it waits for each app to report healthy (see [Health](#health) below).
+Pulls the latest images for all target apps **in parallel** (keeping `PARALLEL_PULLS` downloads in flight), then stops and recreates each container on the new image — so downtime is just the stop/start window, not the download. The pull phase names the apps it's downloading and counts them off, printing a line per app as it lands, so a long pull across many apps shows progress rather than a silent spinner. Apps that are already stopped stay stopped — their image is still pulled, so they come up current next time (see [Keeping apps as you found them](#keeping-apps-as-you-found-them)). On a terminal it asks for confirmation first (skip with `-y`); an app whose pull fails is left running on its current image and reported. After starting, it waits for each app to report healthy (see [Health](#health) below).
 
 ### Restart
 `./manage.sh restart`
@@ -116,6 +118,26 @@ A dashboard with one line per app: a coloured running/stopped dot, container sta
 <a name="health"></a>
 ### Health
 After starting an app (via `start`, `restart`, `update`, `backup` or `restore`), the script waits for its containers to come up rather than just assuming they will. Containers with a healthcheck must report `healthy`; those without just need to be running. The result line becomes e.g. `linkace started, healthy`, or a warning if a container is unhealthy or still starting after `HEALTH_TIMEOUT` (default 60s; set `0` to skip the wait). The wait is best-effort and never fails the run.
+
+### Keeping apps as you found them
+`update` and `backup` check which apps are actually running before they touch anything, and put each one back the way they found it. An app you deliberately stopped is **not** started as a side effect of updating — its new image is still pulled, so it comes up current the next time you start it.
+
+You see the split up front, and on a terminal a single prompt settles the rest:
+
+```
+  ● 5 running: authelia, gitea, immich, jellyfin, nextcloud
+  ○ 3 stopped: audiobookshelf, larapaper, vaultwarden
+Update 5 running app(s). The other 3 are stopped - what should happen to them?
+  1) leave them stopped, but pull so they're current next start (recommended)
+  2) start them too, so everything ends up running
+  3) skip them entirely - no pull, no changes
+  n) cancel
+Choose [1]:
+```
+
+For cron and scripts, `--stopped=keep|start|skip` (or `STOPPED_POLICY` in `manage.conf`) picks the same three answers without prompting — as does `-y`, which takes the default. `--stopped=start` is the old behaviour, where everything ends up running.
+
+`backup` follows the same rule: a stopped app is archived where it lies, without being started to do it. `stop`, `start` and `restart` are unaffected — those are explicit instructions rather than a sweep, so `restart` on a stopped app still starts it.
 
 ### When something fails
 One bad app doesn't end the run. If an app's containers won't start, its folder is missing, or its archive can't be written, that app is reported and the run carries on through the rest. The failure is printed where it happens — the command's own output, plus a `[hint]` line when the cause is a recognisable one (an image with no build for your architecture, a bind-mount path docker can't reach, a port already taken, an image or tag that doesn't exist, a full disk, a *folder* named `compose.yaml` shadowing the real compose file).
