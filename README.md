@@ -48,7 +48,7 @@ To pin the set or the order instead, list the folders explicitly e.g. `Apps="lin
 `DOCKER_VOLUMES` defaults to `/home/$USERNAME/docker_volumes/` and can be overwritten in the script, or from the environment without editing anything — handy for MacOS: `DOCKER_VOLUMES="/Users/UserName/docker_volumes/" ./manage.sh start`
 `STOP_TIMEOUT` (default `30`) - seconds to wait for containers to shut down gracefully before docker gives up. Raise it for databases that take a while to flush.
 `HEALTH_TIMEOUT` (default `60`) - after starting an app, seconds to wait for its containers to become healthy (or just running, if they have no healthcheck) before moving on. Set `0` to skip the wait entirely.
-`PARALLEL_PULLS` (default `3`) - how many image pulls `update`/`backup` run at once. Set `1` for the old one-at-a-time behaviour.
+`PARALLEL_PULLS` (default `3`) - how many image pulls `update`/`backup` keep in flight at once; as each one finishes the next app starts straight away. Set `1` for the old one-at-a-time behaviour.
 `BACKUP_KEEP` (unset by default) - when set to a number, only that many most-recent backup archives are kept per app; older ones are pruned after each backup.
 
 `NOTIFY_WEBHOOK` (unset by default) - a webhook URL (Slack and Discord formats both work) that gets a message when an update, backup or restore completes or fails. Handy for cron runs. See issue [#3](https://github.com/AdamXweb/DockerDance/issues/3).
@@ -93,7 +93,7 @@ Starts all the apps by navigating through each folder and starting with `docker 
 
 ### Update
 `./manage.sh update`
-Pulls the latest images for all target apps **in parallel** (up to `PARALLEL_PULLS` at once), then stops and recreates each container on the new image — so downtime is just the stop/start window, not the download. On a terminal it asks for confirmation first (skip with `-y`); an app whose pull fails is left running on its current image and reported. After starting, it waits for each app to report healthy (see [Health](#health) below).
+Pulls the latest images for all target apps **in parallel** (keeping `PARALLEL_PULLS` downloads in flight), then stops and recreates each container on the new image — so downtime is just the stop/start window, not the download. The pull phase names the apps it's downloading and counts them off, printing a line per app as it lands, so a long pull across many apps shows progress rather than a silent spinner. On a terminal it asks for confirmation first (skip with `-y`); an app whose pull fails is left running on its current image and reported. After starting, it waits for each app to report healthy (see [Health](#health) below).
 
 ### Restart
 `./manage.sh restart`
