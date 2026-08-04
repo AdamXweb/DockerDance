@@ -11,6 +11,19 @@ The first release since v0.1.0 - a substantial robustness, safety and UX
 overhaul. `./manage.sh update-self` will offer this to anyone on v0.1.0.
 
 ### Added
+- **One bad app no longer ends the run.** A failure on a single app (its
+  containers won't start, its folder is missing, its archive can't be written)
+  is reported and the run carries on through the remaining apps, instead of
+  stopping dead on the first one. Every command closes with a plain tally -
+  `Updated 27 of 30 apps in 3m 4s - 1 failed, 2 skipped` - followed by the
+  names in each bucket, and exits non-zero when anything didn't make it, so
+  cron and scripts can tell without reading the output. A failed `backup`
+  starts the app again rather than leaving it stopped.
+- **Hints for the usual docker failures.** Where the cause is recognisable,
+  a `[hint]` line says what to do about it - an image with no build for your
+  architecture, a bind-mount path the daemon can't reach, a port already
+  taken, an image or tag that doesn't exist, a full disk, or a *folder*
+  named `compose.yaml` shadowing the real compose file.
 - **Docker install offer.** When Docker isn't installed, commands now point to
   the official install docs and can fetch and run Docker's `get.docker.com`
   script for you after you confirm (interactive only, never in cron).
@@ -96,6 +109,10 @@ overhaul. `./manage.sh update-self` will offer this to anyone on v0.1.0.
   symlink pre-creation angle when running as root.
 
 ### Fixed
+- Without a terminal (cron, pipes) a failed step was never labelled as one -
+  `run_step` returned success regardless, and the run died with only docker's
+  raw output as a clue. Failures are now reported and propagated the same way
+  they are on a terminal.
 - **Graceful shutdown before backup.** `docker compose kill` (SIGKILL) is
   replaced with `docker compose stop` everywhere, so databases shut down cleanly
   before their volumes are archived — `kill` risked backing up corrupt state.

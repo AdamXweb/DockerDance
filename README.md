@@ -117,6 +117,22 @@ A dashboard with one line per app: a coloured running/stopped dot, container sta
 ### Health
 After starting an app (via `start`, `restart`, `update`, `backup` or `restore`), the script waits for its containers to come up rather than just assuming they will. Containers with a healthcheck must report `healthy`; those without just need to be running. The result line becomes e.g. `linkace started, healthy`, or a warning if a container is unhealthy or still starting after `HEALTH_TIMEOUT` (default 60s; set `0` to skip the wait). The wait is best-effort and never fails the run.
 
+### When something fails
+One bad app doesn't end the run. If an app's containers won't start, its folder is missing, or its archive can't be written, that app is reported and the run carries on through the rest. The failure is printed where it happens — the command's own output, plus a `[hint]` line when the cause is a recognisable one (an image with no build for your architecture, a bind-mount path docker can't reach, a port already taken, an image or tag that doesn't exist, a full disk, a *folder* named `compose.yaml` shadowing the real compose file).
+
+Every run then closes with a per-app table and a tally of what actually made it:
+
+```
+  ● authelia                 updated         4s
+  ○ audiobookshelf           failed         12s
+  ○ larapaper                skipped         0s
+[warn] - Updated 27 of 30 apps in 3m 4s - 1 failed, 2 skipped
+  failed:  audiobookshelf, vaultwarden
+  skipped: larapaper, pinchflat-X
+```
+
+`skipped` means the app was left untouched (its image pull failed, so it stays on the image it has); `failed` means the command was attempted and didn't work. The script exits non-zero when either bucket is non-empty, so a cron job or wrapper script can tell without parsing the output. A `backup` whose archive fails still starts the app back up rather than leaving it stopped.
+
 #### Minor commands
 `./manage.sh version`
 Display versions of images: `docker compose images`
