@@ -375,15 +375,19 @@ counter() {
   fi
 }
 
+#Seconds as "45s" or "3m 20s"
+human_secs() {
+  if [ "$1" -ge 60 ]; then
+    printf '%dm %ds' $(($1 / 60)) $(($1 % 60))
+  else
+    printf '%ds' "$1"
+  fi
+}
+
 RUN_START=""
 elapsed() {
   [ -z "$RUN_START" ] && return 0
-  e=$(( $(date +%s) - RUN_START ))
-  if [ "$e" -ge 60 ]; then
-    printf '%dm %ds' $((e / 60)) $((e % 60))
-  else
-    printf '%ds' "$e"
-  fi
+  human_secs $(( $(date +%s) - RUN_START ))
 }
 
 #Per-app results collected during a run, shown as a closing summary
@@ -410,47 +414,93 @@ list_apps() {
   echo "---"
 }
 
-#Pull with docker's own progress bars on a terminal, quietly otherwise
-pull_images() {
-  echo "$(counter)Pulling ${bold}$1${normal} images"
-  if [ -n "$SPINNER" ]; then
-    compose pull
-  else
-    compose pull --quiet
-  fi
-}
-
 #How many image pulls to run at once (nala-style). 1 makes pulls sequential.
 PARALLEL_PULLS="${PARALLEL_PULLS:-3}"
+#0, a negative or a typo would leave the orchestrator with no slot it can ever
+#fill, so fall back to the default rather than spinning forever
+[ "$PARALLEL_PULLS" -ge 1 ] 2>/dev/null || PARALLEL_PULLS=3
 
 #Pull one app's images quietly - used by the parallel orchestrator, where
-#interleaved progress bars would be unreadable.
+#interleaved progress bars would be unreadable. Writes an event line when it's
+#done and then drops its slot marker, so the foreground can report progress
+#instead of sitting behind a bare spinner for the whole phase. The marker is
+#created by the orchestrator before the fork, so slot accounting can't race.
 _pull_one() {
-  enter_app "$1"
-  compose pull --quiet
+  po_app=$1
+  po_start=$(date +%s)
+  if ( enter_app "$po_app" && compose pull --quiet ) >"$pp_dir/$po_app.log" 2>&1; then
+    po_state="pulled"
+  else
+    po_state="failed"
+    echo "$po_app" >>"$pp_dir/failed"
+  fi
+  echo "$po_app|$po_state|$(( $(date +%s) - po_start ))" >>"$pp_dir/events"
+  rm -f "$pp_dir/active.$po_app"
 }
 
-#Launch pulls in batches of PARALLEL_PULLS, recording any that fail.
+#Count the pulls in flight into PULL_BUSY. A plain glob rather than a $(...)
+#so the polling loop below doesn't fork on every pass.
+PULL_BUSY=0
+_pull_count_active() {
+  PULL_BUSY=0
+  for pc_f in "$pp_dir"/active.*; do
+    [ -e "$pc_f" ] || continue
+    PULL_BUSY=$((PULL_BUSY + 1))
+  done
+}
+
+#Keep PARALLEL_PULLS pulls in flight: start a new app the moment any one
+#finishes, rather than waiting for a whole batch. `wait -n` would do this
+#directly but isn't POSIX, so slots are tracked with the marker files and
+#polled - a pull runs for seconds at least, so half a second of slack costs
+#nothing next to leaving a download slot idle.
 _pull_orchestrate() {
   while [ $# -gt 0 ]; do
-    po_pids=""
-    po_c=0
-    while [ $# -gt 0 ] && [ "$po_c" -lt "$PARALLEL_PULLS" ]; do
-      po_app=$1
+    _pull_count_active
+    while [ $# -gt 0 ] && [ "$PULL_BUSY" -lt "$PARALLEL_PULLS" ]; do
+      : >"$pp_dir/active.$1"
+      PULL_BUSY=$((PULL_BUSY + 1))
+      _pull_one "$1" &
       shift
-      po_c=$((po_c + 1))
-      ( _pull_one "$po_app" ) >"$pp_dir/$po_app.log" 2>&1 &
-      po_pid=$!
-      po_pids="$po_pids $po_pid"
-      echo "$po_app" >"$pp_dir/pid.$po_pid"
     done
-    # shellcheck disable=SC2086 # pids are numeric, space-separated on purpose
-    for po_pid in $po_pids; do
-      if ! wait "$po_pid"; then
-        cat "$pp_dir/pid.$po_pid" >>"$pp_dir/failed"
-      fi
-    done
+    [ $# -gt 0 ] && { sleep 0.5 2>/dev/null || sleep 1; }
   done
+  wait
+}
+
+#The apps whose pull is in flight right now, as a readable list
+_pull_active() {
+  pa_list=""
+  for pa_f in "$pp_dir"/active.*; do
+    [ -e "$pa_f" ] || continue
+    pa_name=${pa_f##*/active.}
+    if [ -z "$pa_list" ]; then pa_list=$pa_name; else pa_list="$pa_list, $pa_name"; fi
+  done
+  printf '%s' "$pa_list"
+}
+
+#Print a line for every pull that has finished since the last call. Called from
+#the foreground while the orchestrator runs, so a long pull phase scrolls a
+#record of what landed rather than showing nothing until it's all over.
+pp_seen=0
+_pull_drain() {
+  [ -s "$pp_dir/events" ] || return 0
+  pd_new=$(tail -n +"$((pp_seen + 1))" "$pp_dir/events" 2>/dev/null) || pd_new=""
+  [ -z "$pd_new" ] && return 0
+  pp_seen=$(( pp_seen + $(printf '%s\n' "$pd_new" | wc -l) ))
+  #wipe the spinner line so the results land on a clean row
+  [ -n "$SPINNER" ] && { printf '\r'; tput el 2>/dev/null || printf '%-79s\r' ''; }
+  printf '%s\n' "$pd_new" | while IFS='|' read -r pd_app pd_state pd_secs; do
+    [ -z "$pd_app" ] && continue
+    if [ "$pd_state" = "pulled" ]; then
+      printf '  %s%s%s %s%-24s%s %spulled in %s%s\n' "$green" "$DOT_ON" "$normal" \
+        "$bold" "$pd_app" "$normal" "$dim" "$(human_secs "$pd_secs")" "$normal"
+    else
+      printf '  %s%s%s %s%-24s%s %sfailed after %s%s\n' "$red" "$DOT_OFF" "$normal" \
+        "$bold" "$pd_app" "$normal" "$dim" "$(human_secs "$pd_secs")" "$normal"
+    fi
+  done
+  return 0
 }
 
 #Pull images for several apps concurrently. Sets PULL_FAILED to the apps whose
@@ -465,19 +515,38 @@ parallel_pull() {
     return 0
   fi
   pp_total=$#
+  pp_seen=0
+  pp_start=$(date +%s)
   pp_dir=$(mktemp -d "${TMPDIR:-/tmp}/dockerdance-pull.XXXXXX" 2>/dev/null) || { pp_dir="${TMPDIR:-/tmp}/dockerdance-pull.$$"; mkdir -p "$pp_dir"; }
   : >"$pp_dir/failed"
+  : >"$pp_dir/events"
   #Run the orchestrator in the background so one spinner can cover the phase.
   ( _pull_orchestrate "$@" ) >"$pp_dir/orch.log" 2>&1 &
   pp_orch=$!
-  pp_label="Pulling images for $pp_total app(s), up to $PARALLEL_PULLS at a time"
+  echo "Pulling images for $pp_total app(s), up to $PARALLEL_PULLS at a time"
   if [ -n "$SPINNER" ]; then
+    #Pad the status to the terminal width so a shrinking app list leaves no debris
+    pp_w=$(tput cols 2>/dev/null || echo 80)
+    [ "$pp_w" -ge 24 ] 2>/dev/null || pp_w=80
+    pp_w=$((pp_w - 4))
     tput civis 2>/dev/null || true
+    pp_tick=0
+    pp_status="starting"
     while kill -0 "$pp_orch" 2>/dev/null; do
       # shellcheck disable=SC2086 # frames are an intentionally space-separated list
       for pp_frame in $SPINNER_FRAMES; do
         kill -0 "$pp_orch" 2>/dev/null || break
-        printf '\r%s%s%s %s' "$cyan" "$pp_frame" "$normal" "$pp_label"
+        #Refresh the wording about once a second; the frames spin ten times faster
+        if [ "$pp_tick" -le 0 ]; then
+          _pull_drain
+          pp_busy=$(_pull_active)
+          [ -z "$pp_busy" ] && pp_busy="starting"
+          pp_status="[$pp_seen/$pp_total] pulling $pp_busy"
+          pp_tick=10
+        fi
+        pp_tick=$((pp_tick - 1))
+        # shellcheck disable=SC2059 # the width is computed, the rest of the format is fixed
+        printf "\r%s%s%s %-${pp_w}.${pp_w}s" "$cyan" "$pp_frame" "$normal" "$pp_status"
         sleep 0.1 2>/dev/null || sleep 1
       done
     done
@@ -486,15 +555,28 @@ parallel_pull() {
     tput cnorm 2>/dev/null || true
     wait "$pp_orch" || true
   else
-    echo "$pp_label..."
+    #No terminal (cron, pipes): still report each pull as it lands
+    while kill -0 "$pp_orch" 2>/dev/null; do
+      _pull_drain
+      sleep 1
+    done
     wait "$pp_orch" || true
   fi
+  _pull_drain
   PULL_FAILED=$(tr '\n' ' ' <"$pp_dir/failed")
   PULL_FAILED=${PULL_FAILED% }
+  pp_fails=0
   for pp_app in $PULL_FAILED; do
+    pp_fails=$((pp_fails + 1))
     warn "Pull failed for $pp_app - leaving it on its current image"
     [ -s "$pp_dir/$pp_app.log" ] && sed 's/^/    /' "$pp_dir/$pp_app.log" >&2
   done
+  pp_took=$(human_secs $(( $(date +%s) - pp_start )))
+  if [ "$pp_fails" -gt 0 ]; then
+    warn "Pulled $((pp_total - pp_fails))/$pp_total app(s) in $pp_took - $pp_fails failed"
+  else
+    ok "Pulled images for $pp_total app(s) in $pp_took"
+  fi
   rm -rf "$pp_dir"
 }
 

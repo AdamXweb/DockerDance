@@ -25,8 +25,14 @@ overhaul. `./manage.sh update-self` will offer this to anyone on v0.1.0.
   `restore` wait for containers to become healthy (or just running, with no
   healthcheck) before reporting done. Tunable with `HEALTH_TIMEOUT` (0 skips).
 - **Parallel image pulls.** `update` and `backup` pull all target apps'
-  images at once, up to `PARALLEL_PULLS` (default 3); a failed pull leaves
-  that app on its current image and is skipped rather than aborting the run.
+  images at once, keeping `PARALLEL_PULLS` (default 3) downloads in flight -
+  the next app starts the moment any one finishes, so a single slow image
+  never idles the other slots. A failed pull leaves that app on its current
+  image and is skipped rather than aborting the run.
+  The pull phase reports as it goes - the spinner names the apps currently
+  downloading and counts them off (`[4/30]`), each app prints a line as it
+  lands or fails, and the phase closes with a total. Without a terminal
+  (cron, pipes) the same per-app lines are written as each pull finishes.
 - **`--dry-run`** previews any command without touching anything, **`-y`/`--yes`**
   skips confirmations (and lets `restore` run non-interactively), and **update**
   now confirms before recreating containers on a terminal. **`--no-color`** flag.
