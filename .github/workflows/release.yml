@@ -1,0 +1,53 @@
+name: Release
+
+# Pushing a v* tag publishes the release, using that version's CHANGELOG
+# section as the notes. Tagging stays the only manual step:
+#   git tag v0.4.0 && git push origin v0.4.0
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag must match manage.sh VERSION
+        run: |
+          tag_version=${GITHUB_REF_NAME#v}
+          file_version=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' docker_volumes/manage.sh | head -1)
+          if [ "$tag_version" != "$file_version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match VERSION=\"$file_version\" in docker_volumes/manage.sh" >&2
+            exit 1
+          fi
+
+      # update-self downloads manage.sh at the release tag and runs it, so a
+      # broken script must never make it into a release
+      - name: ShellCheck the tagged script
+        run: |
+          shellcheck docker_volumes/manage.sh contrib/dockerdance-completion.bash
+          sh -n docker_volumes/manage.sh
+
+      - name: Take the release notes from the CHANGELOG
+        run: |
+          tag_version=${GITHUB_REF_NAME#v}
+          awk -v want="## [$tag_version]" '
+            index($0, want) == 1 { found = 1; next }
+            found && /^## \[/     { exit }
+            found                 { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "CHANGELOG.md has no '## [$tag_version]' section to release from" >&2
+            exit 1
+          fi
+          cat release-notes.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md

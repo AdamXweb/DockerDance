@@ -5,10 +5,14 @@ All notable changes to DockerDance are documented here. The format follows
 [Semantic Versioning](https://semver.org/). `./manage.sh update-self` updates to
 the latest tagged release.
 
-## [0.3.0] - 2026-07-13
+To cut a release: add the section below, set `VERSION` in `manage.sh` to match,
+then push the tag (`git tag v0.4.0 && git push origin v0.4.0`). The release
+workflow publishes it using this file's section for that version as the notes.
 
-The first release since v0.1.0 - a substantial robustness, safety and UX
-overhaul. `./manage.sh update-self` will offer this to anyone on v0.1.0.
+## [0.4.0] - 2026-08-04
+
+Failure handling and feedback, largely shaped by a 30-app `update` that stopped
+dead on the first broken app and said almost nothing about the rest.
 
 ### Added
 - **Apps are put back the way they were found.** `update` and `backup` now
@@ -34,6 +38,33 @@ overhaul. `./manage.sh update-self` will offer this to anyone on v0.1.0.
   architecture, a bind-mount path the daemon can't reach, a port already
   taken, an image or tag that doesn't exist, a full disk, or a *folder*
   named `compose.yaml` shadowing the real compose file.
+- **Live progress while images pull.** The pull phase announced itself and then
+  went quiet for the whole download. The spinner now names the apps currently
+  downloading and counts them off (`[4/30]`), each app prints a line as it
+  lands or fails, and the phase closes with a total. Without a terminal
+  (cron, pipes) the same per-app lines are written as each pull finishes.
+
+### Changed
+- **Pulls keep `PARALLEL_PULLS` downloads in flight**, starting the next app
+  the moment any one finishes, rather than waiting for a whole batch of three
+  to complete before beginning the next three - one slow image no longer
+  leaves the other download slots idle.
+
+### Fixed
+- Without a terminal (cron, pipes) a failed step was never labelled as one -
+  `run_step` returned success regardless, and the run died with only docker's
+  raw output as a clue. Failures are now reported and propagated the same way
+  they are on a terminal.
+- A `PARALLEL_PULLS` of `0`, a negative or a typo left the pull orchestrator
+  with no slot it could ever fill, hanging the run; it now falls back to the
+  default of 3.
+
+## [0.3.0] - 2026-07-13
+
+The first release since v0.1.0 - a substantial robustness, safety and UX
+overhaul. `./manage.sh update-self` will offer this to anyone on v0.1.0.
+
+### Added
 - **Docker install offer.** When Docker isn't installed, commands now point to
   the official install docs and can fetch and run Docker's `get.docker.com`
   script for you after you confirm (interactive only, never in cron).
@@ -48,14 +79,8 @@ overhaul. `./manage.sh update-self` will offer this to anyone on v0.1.0.
   `restore` wait for containers to become healthy (or just running, with no
   healthcheck) before reporting done. Tunable with `HEALTH_TIMEOUT` (0 skips).
 - **Parallel image pulls.** `update` and `backup` pull all target apps'
-  images at once, keeping `PARALLEL_PULLS` (default 3) downloads in flight -
-  the next app starts the moment any one finishes, so a single slow image
-  never idles the other slots. A failed pull leaves that app on its current
-  image and is skipped rather than aborting the run.
-  The pull phase reports as it goes - the spinner names the apps currently
-  downloading and counts them off (`[4/30]`), each app prints a line as it
-  lands or fails, and the phase closes with a total. Without a terminal
-  (cron, pipes) the same per-app lines are written as each pull finishes.
+  images at once, up to `PARALLEL_PULLS` (default 3); a failed pull leaves
+  that app on its current image and is skipped rather than aborting the run.
 - **`--dry-run`** previews any command without touching anything, **`-y`/`--yes`**
   skips confirmations (and lets `restore` run non-interactively), and **update**
   now confirms before recreating containers on a terminal. **`--no-color`** flag.
@@ -119,10 +144,6 @@ overhaul. `./manage.sh update-self` will offer this to anyone on v0.1.0.
   symlink pre-creation angle when running as root.
 
 ### Fixed
-- Without a terminal (cron, pipes) a failed step was never labelled as one -
-  `run_step` returned success regardless, and the run died with only docker's
-  raw output as a clue. Failures are now reported and propagated the same way
-  they are on a terminal.
 - **Graceful shutdown before backup.** `docker compose kill` (SIGKILL) is
   replaced with `docker compose stop` everywhere, so databases shut down cleanly
   before their volumes are archived — `kill` risked backing up corrupt state.
@@ -141,5 +162,6 @@ overhaul. `./manage.sh update-self` will offer this to anyone on v0.1.0.
 - Initial release: bulk `start` / `stop` / `restart` / `update` / `backup` of
   docker-compose apps laid out in per-app folders.
 
+[0.4.0]: https://github.com/AdamXweb/DockerDance/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/AdamXweb/DockerDance/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/AdamXweb/DockerDance/releases/tag/v0.1.0
