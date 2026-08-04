@@ -11,6 +11,16 @@ The first release since v0.1.0 - a substantial robustness, safety and UX
 overhaul. `./manage.sh update-self` will offer this to anyone on v0.1.0.
 
 ### Added
+- **Apps are put back the way they were found.** `update` and `backup` now
+  check which apps are actually running before touching anything, show you
+  the split, and leave stopped apps stopped - an app you deliberately shut
+  down no longer comes back up as a side effect of updating. Its new image
+  is still pulled, so it starts current next time. On a terminal a single
+  prompt asks what to do with the stopped ones (leave them / start them too /
+  skip them entirely, with a recommendation); `--stopped=keep|start|skip`
+  (or `STOPPED_POLICY` in `manage.conf`) decides it for cron. `--stopped=start`
+  restores the old sweep-everything-up behaviour. `stop`, `start` and
+  `restart` are unchanged - those are explicit instructions, not a sweep.
 - **One bad app no longer ends the run.** A failure on a single app (its
   containers won't start, its folder is missing, its archive can't be written)
   is reported and the run carries on through the remaining apps, instead of
