@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-VERSION="0.3.0"
+VERSION="0.4.0"
 #Repo used by update-self; override with DOCKERDANCE_REPO=owner/name
 SELF_REPO="${DOCKERDANCE_REPO:-AdamXweb/DockerDance}"
 
