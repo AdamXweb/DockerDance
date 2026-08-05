@@ -14,7 +14,26 @@ workflow publishes it using this file's section for that version as the notes.
 Failure handling and feedback, largely shaped by a 30-app `update` that stopped
 dead on the first broken app and said almost nothing about the rest.
 
+### Security
+- **Backup archives are matched exactly, never by prefix.** When one app's
+  name was another's plus a digit (`vault` / `vault2`), the old glob let
+  `BACKUP_KEEP` pruning delete the *other* app's backups and `restore` pick
+  the wrong archive. New archives get a separator (`vault_2026-08-04.tar.bz2`);
+  both old and new names are still read, but only ever the right app's.
+- **Scratch files live in a private 0700 directory.** The step log was a
+  single mktemp'd file that the interactive menu deleted after each command,
+  freeing a known /tmp name another local user could squat with a symlink.
+- **The run lock moved out of /tmp** into the managed folder itself
+  (`.dockerdance.lock`), so another local user can no longer pre-create the
+  predictable name and permanently lock the tool. It records the owning pid,
+  and a lock whose process is gone clears itself instead of demanding manual
+  removal after a crash or reboot.
+
 ### Added
+- **A test suite.** `tests/run-tests.sh` drives `manage.sh` against a stub
+  docker (no daemon needed) and asserts on exit codes, output and the exact
+  docker actions taken - the state matrix, failure handling, backup/restore
+  roundtrips, archive collision and lock behaviour. CI runs it on every PR.
 - **Apps are put back the way they were found.** `update` and `backup` now
   check which apps are actually running before touching anything, show you
   the split, and leave stopped apps stopped - an app you deliberately shut

@@ -67,20 +67,35 @@ case "$SPINNER_FRAMES" in
   * )  DOT_ON='*' DOT_OFF='-' ;;
 esac
 
-#mktemp gives an unpredictable, owner-only name so another user can't pre-create
-#it as a symlink and have root truncate a file through us. Fall back to the PID.
-STEP_LOG=$(mktemp "${TMPDIR:-/tmp}/dockerdance-step.XXXXXX" 2>/dev/null) || STEP_LOG="${TMPDIR:-/tmp}/dockerdance-step.$$.log"
-#One state-changing run at a time per docker_volumes folder (protects
-#against a cron backup overlapping a manual update)
-LOCK_DIR="${TMPDIR:-/tmp}/dockerdance$(pwd | tr '/ ' '__').lock"
+#All scratch files live in one owner-only (0700) directory, so no other user
+#can pre-create, replace or even see them. A single mktemp'd *file* wasn't
+#enough: the interactive menu deletes it after each command, freeing a name
+#another user had already seen - a symlink planted there would then have a
+#root-run step truncate whatever it pointed at.
+RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dockerdance.XXXXXX" 2>/dev/null) || {
+  RUN_DIR="${TMPDIR:-/tmp}/dockerdance.$$"
+  #No -p: if this predictable name already exists it isn't ours - stop.
+  mkdir -m 700 "$RUN_DIR" || { echo "Couldn't create a private temp dir at $RUN_DIR" >&2; exit 1; }
+}
+STEP_LOG="$RUN_DIR/step.log"
+#One state-changing run at a time per docker_volumes folder. The lock lives
+#in the (user-owned) folder being managed itself, not world-writable /tmp,
+#where any other local user could squat the predictable name and lock us out
+#for good. The pid inside lets a crashed run's lock clear itself.
+LOCK_DIR="$(pwd)/.dockerdance.lock"
 HAVE_LOCK=""
 NOTIFY_CONTEXT=""
+#Set (only) by the interactive menu's per-command subshell: its cleanup must
+#release the lock and restore the cursor, but the run dir belongs to the
+#session and has to survive into the next menu command.
+RUN_DIR_KEEP=""
 cleanup() {
   cleanup_status=$?
   tput cnorm 2>/dev/null || true
   rm -f "$STEP_LOG"
+  [ -z "$RUN_DIR_KEEP" ] && rm -rf "$RUN_DIR"
   if [ -n "$HAVE_LOCK" ]; then
-    rmdir "$LOCK_DIR" 2>/dev/null || true
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
   fi
   if [ "$cleanup_status" -ne 0 ] && [ -n "$NOTIFY_CONTEXT" ]; then
     notify "$NOTIFY_CONTEXT failed (exit $cleanup_status)"
@@ -206,9 +221,21 @@ run_step() {
 acquire_lock() {
   [ -n "$HAVE_LOCK" ] && return 0
   if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    error "Another manage.sh run appears to be active here (lock: $LOCK_DIR). Remove that folder if it's stale."
-    exit 1
+    #A lock whose recorded process is gone is left over from a crash or a
+    #reboot - clear it and try once more. (kill -0 can't tell a foreign
+    #user's live process from a dead one, but the lock sits inside this
+    #user's own docker_volumes folder, so that ambiguity doesn't arise.)
+    al_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null)
+    if [ -n "$al_pid" ] && ! kill -0 "$al_pid" 2>/dev/null; then
+      warn "Clearing a stale lock left by exited run (pid $al_pid)"
+      rm -rf "$LOCK_DIR"
+    fi
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+      error "Another manage.sh run is active here (lock: $LOCK_DIR, pid ${al_pid:-unknown})."
+      exit 1
+    fi
   fi
+  echo "$$" >"$LOCK_DIR/pid"
   HAVE_LOCK=1
 }
 
@@ -960,12 +987,12 @@ backup_app() {
   if [ "$was_up" -eq 1 ] && in_list "$1" "$APPS_UP"; then
     run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT" || return 1
   fi
-  archive="${TARGET}${1}$(date '+%Y-%m-%d').tar.bz2"
+  archive="${TARGET}${1}_$(date '+%Y-%m-%d').tar.bz2"
   if [ -z "${DRY_RUN:-}" ]; then
     mkdir -p "$TARGET"
     if [ -e "$archive" ]; then
       warn "${archive##*/} already exists - keeping it and adding a timestamp to this one"
-      archive="${TARGET}${1}$(date '+%Y-%m-%d_%H%M%S').tar.bz2"
+      archive="${TARGET}${1}_$(date '+%Y-%m-%d_%H%M%S').tar.bz2"
     fi
   fi
   #Relative paths inside the archive make restores portable; 600 keeps the
@@ -975,8 +1002,7 @@ backup_app() {
   if [ "$archive_status" -eq 0 ] && [ -z "${DRY_RUN:-}" ]; then
     chmod 600 "$archive"
     if [ -n "${BACKUP_KEEP:-}" ]; then
-      # shellcheck disable=SC2012 # archive names are script-generated (no spaces/newlines)
-      ls -1t "${TARGET}${1}"[0-9]*.tar.bz2 2>/dev/null | tail -n +"$((BACKUP_KEEP + 1))" | while IFS= read -r old_backup; do
+      list_archives "$1" | tail -n +"$((BACKUP_KEEP + 1))" | while IFS= read -r old_backup; do
         rm -f "$old_backup"
         warn "Pruned old backup ${old_backup##*/} (BACKUP_KEEP=$BACKUP_KEEP)"
       done
@@ -1004,6 +1030,27 @@ backup_app() {
   leave_app
 }
 
+#Newest-first list of $1's own backup archives. The name after the app part
+#must be exactly a date (with an optional _HHMMSS), in either the current
+#'app_YYYY-MM-DD' form or the pre-0.4.1 'appYYYY-MM-DD' form - so an app
+#whose name extends another's (vault / vault2) never matches its neighbour's
+#archives. A bare glob did, which let BACKUP_KEEP prune the wrong app's
+#backups and restore pick the wrong archive.
+list_archives() {
+  # shellcheck disable=SC2012 # archive names are script-generated (no newlines); ls -t sorts newest first
+  ls -1t "${TARGET}${1}"*.tar.bz2 2>/dev/null | while IFS= read -r la_f; do
+    la_s=${la_f##*/}
+    la_s=${la_s#"$1"}
+    case "$la_s" in
+      _[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].tar.bz2 | \
+      _[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9].tar.bz2 | \
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].tar.bz2 | \
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9].tar.bz2 )
+        printf '%s\n' "$la_f" ;;
+    esac
+  done
+}
+
 tar_is_busybox() {
   case "$(tar --version 2>&1 | head -1)" in
     *[Bb]usy[Bb]ox* ) return 0 ;;
@@ -1018,8 +1065,7 @@ tar_is_busybox() {
 #checked for path-traversal, and only the '<app>/' subtree is promoted.
 restore_app() {
   app_start=$(date +%s)
-  # shellcheck disable=SC2012 # archive names are script-generated (no spaces/newlines)
-  archive=$(ls -1t "${TARGET}${1}"[0-9]*.tar.bz2 2>/dev/null | head -1)
+  archive=$(list_archives "$1" | head -1)
   if [ -z "$archive" ]; then
     error "No backups found for '$1' in $TARGET"
     return 1
@@ -1283,7 +1329,12 @@ run_doctor() {
     echo "  manage.conf: not present (using script defaults / environment)"
   fi
   if [ -d "$LOCK_DIR" ]; then
-    dwarn "A run lock exists ($LOCK_DIR) - another run is active, or it's stale (remove it if so)"
+    dr_lockpid=$(cat "$LOCK_DIR/pid" 2>/dev/null)
+    if [ -n "$dr_lockpid" ] && kill -0 "$dr_lockpid" 2>/dev/null; then
+      dwarn "A run lock is held by an active run (pid $dr_lockpid)"
+    else
+      dwarn "A stale run lock exists ($LOCK_DIR) - the next state-changing command will clear it"
+    fi
   else
     dok "No stale run lock"
   fi
@@ -1729,7 +1780,7 @@ interactive() {
     #Run in a subshell so one failed command reports and returns to the menu
     #instead of ending the whole session under set -e
     set +e
-    ( set -e; trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM; run_command "$choice" )
+    ( set -e; RUN_DIR_KEEP=1; trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM; run_command "$choice" )
     menu_status=$?
     set -e
     if [ "$menu_status" -ne 0 ]; then
