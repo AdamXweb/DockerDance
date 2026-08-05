@@ -232,6 +232,31 @@ run restore --yes alpha 2030-12-31
 assert_status 1
 assert_out "No backup dated 2030-12-31"
 
+begin "update --backup-first: archives, then the app runs on the new image"
+apps alpha
+printf 'alpha\n' >"$DD_STATE/up"
+echo "safety" >"$SANDBOX/alpha/data.txt"
+run update --yes --backup-first
+assert_status 0
+assert_out "backup-first"
+archive=$(ls "$SANDBOX/backup/alpha_"*.tar.bz2 2>/dev/null | head -1)
+assert_file "$archive"
+assert_pulled alpha
+assert_action "STOP:alpha"
+assert_action "UP:alpha"
+
+begin "doctor: reports free backup space and loaded conf"
+apps alpha
+printf 'Apps="auto"\n' >"$SANDBOX/manage.conf"
+chmod 644 "$SANDBOX/manage.conf"
+run doctor
+assert_status 0
+assert_out "Free space for backups"
+assert_out "manage.conf found and loaded"
+chmod 666 "$SANDBOX/manage.conf"
+run doctor
+assert_out "writable by group/others"
+
 begin "prune: runs after update with --prune, not without"
 apps alpha
 printf 'alpha\n' >"$DD_STATE/up"

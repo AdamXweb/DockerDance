@@ -34,6 +34,13 @@ dead on the first broken app and said almost nothing about the rest.
 - **CI actions are pinned to commit SHAs** rather than floating tags.
 
 ### Added
+- **`update --backup-first`** archives every app on its way to the new image -
+  the backup flow already restarts each app on the freshly pulled image, so
+  this is the two commands composed, as one safety net.
+- **`doctor` checks more.** Free disk space where backups are written (they
+  fail late and messily when the disk fills mid-archive), and whether
+  `manage.conf` is writable by group/others - it is sourced as shell, so
+  write access to it is command execution.
 - **Apps that start but never turn healthy get their own tally bucket.**
   `Updated 27 of 30 apps - 1 failed, 1 unhealthy, 1 skipped`, with the names
   listed and a non-zero exit - previously an app that came up broken counted

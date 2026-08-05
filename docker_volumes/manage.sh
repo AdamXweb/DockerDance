@@ -1380,9 +1380,25 @@ run_doctor() {
     dwarn "DOCKER_VOLUMES does not exist: $DOCKER_VOLUMES"
   fi
   if [ -f "./manage.conf" ]; then
-    dok "manage.conf found and loaded"
+    #sourced as shell, so write access to it is command execution as this user
+    # shellcheck disable=SC2012 # a fixed, known filename - ls is fine
+    dr_confperm=$(ls -l "./manage.conf" | cut -c1-10)
+    case "$dr_confperm" in
+      ?????w* | ????????w? ) dwarn "manage.conf is writable by group/others ($dr_confperm) - it runs as shell, tighten it: chmod 644 manage.conf" ;;
+      * ) dok "manage.conf found and loaded" ;;
+    esac
   else
     echo "  manage.conf: not present (using script defaults / environment)"
+  fi
+  #Backups fail late and messily when the disk fills mid-archive
+  dr_avail_kb=$(df -Pk "${TARGET%/}" 2>/dev/null | awk 'NR==2{print $4}')
+  [ -n "$dr_avail_kb" ] || dr_avail_kb=$(df -Pk "$DOCKER_VOLUMES" 2>/dev/null | awk 'NR==2{print $4}')
+  if [ -n "$dr_avail_kb" ]; then
+    if [ "$dr_avail_kb" -lt 1048576 ] 2>/dev/null; then
+      dwarn "Only $((dr_avail_kb / 1024))MB free where backups are written ($TARGET)"
+    else
+      dok "Free space for backups: $((dr_avail_kb / 1024 / 1024))GB in $TARGET"
+    fi
   fi
   if [ -d "$LOCK_DIR" ]; then
     dr_lockpid=$(cat "$LOCK_DIR/pid" 2>/dev/null)
@@ -1529,6 +1545,7 @@ Options:
                keep (default) leaves them stopped with their new image ready,
                start brings them up too, skip leaves them entirely alone
   --prune      After update, remove dangling images (or PRUNE_AFTER_UPDATE=1)
+  --backup-first  Archive each app before it moves to the new image (update)
   --no-color   Disable coloured output
 
 Commands run against every app in the Apps variable. The default, "auto",
@@ -1539,6 +1556,12 @@ EOF
 
 run_command() {
   menu_command=$1
+  #backup already ends each app on the freshly pulled image, so an update
+  #with a safety archive first is exactly the backup flow
+  if [ "$menu_command" = "update" ] && [ -n "$BACKUP_FIRST" ]; then
+    echo "--backup-first: each app is archived, then started on its new image"
+    menu_command="backup"
+  fi
   case "$menu_command" in
     'backup' | 'restore' | 'update' | 'stop' | 'start' | 'restart' | 'logs' | 'version' | 'status' ) maybe_discover_apps ;;
   esac
@@ -1902,6 +1925,7 @@ interactive() {
 ASSUME_YES=""
 DRY_RUN=""
 RESTORE_DATE=""
+BACKUP_FIRST=""
 positional=""
 for arg in "$@"; do
   case "$arg" in
@@ -1909,6 +1933,7 @@ for arg in "$@"; do
     --dry-run ) DRY_RUN=1 ;;
     --stopped=* ) STOPPED_POLICY=${arg#--stopped=}; STOPPED_SET=1 ;;
     --prune ) PRUNE_AFTER_UPDATE=1 ;;
+    --backup-first ) BACKUP_FIRST=1 ;;
     --no-color ) bold=""; normal=""; red=""; green=""; yellow=""; cyan=""; dim="" ;;
     #A date-shaped argument picks the archive for restore (never a valid app name)
     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] | [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9] ) RESTORE_DATE=$arg ;;
