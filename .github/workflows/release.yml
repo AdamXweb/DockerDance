@@ -15,7 +15,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
 
       - name: Tag must match manage.sh VERSION
         run: |
@@ -50,4 +50,8 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md
+        # The sha256 asset lets update-self verify its download; the file is
+        # named for how it lands ("manage.sh"), not its repo path.
+        run: |
+          sha256sum docker_volumes/manage.sh | awk '{print $1 "  manage.sh"}' > manage.sh.sha256
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md manage.sh.sha256

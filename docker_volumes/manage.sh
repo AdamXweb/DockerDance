@@ -108,9 +108,17 @@ trap 'exit 143' TERM
 #NOTIFY_WEBHOOK (optional, set in manage.conf or the environment): URL that
 #receives a message when update/backup/restore completes or fails. The JSON
 #payload suits Slack ("text") and Discord ("content") webhooks. Issue #3.
+#Escape the four characters that break a JSON string: \ " newline tab.
+#App names and error text flow into the webhook payload, so they can't go
+#in raw.
+json_escape() {
+  printf '%s' "$1" | awk 'BEGIN{ORS=""} NR>1{print "\\n"} {gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/,"\\t"); print}'
+}
+
 notify() {
   [ -z "${NOTIFY_WEBHOOK:-}" ] && return 0
-  notify_payload="{\"text\": \"DockerDance: $1\", \"content\": \"DockerDance: $1\"}"
+  notify_msg=$(json_escape "DockerDance: $1")
+  notify_payload="{\"text\": \"$notify_msg\", \"content\": \"$notify_msg\"}"
   if command -v curl >/dev/null 2>&1; then
     curl -fsS -m 10 -H 'Content-Type: application/json' -d "$notify_payload" "$NOTIFY_WEBHOOK" >/dev/null 2>&1 || warn "Webhook notification failed"
   elif command -v wget >/dev/null 2>&1; then
@@ -1366,11 +1374,35 @@ fetch_url() {
   fi
 }
 
+#SHA-256 of a file with whatever tool the host has; fails quietly when none.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 -r "$1" | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
 update_self() {
   actioninfo "Checking the latest ${bold}$SELF_REPO${normal} release"
-  latest_tag=$(fetch_url "https://api.github.com/repos/$SELF_REPO/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+  #Fetched without curl's -f so an error body (rate limit, not found) can be
+  #told apart from actually being offline
+  if command -v curl >/dev/null 2>&1; then
+    latest_json=$(curl -sSL "https://api.github.com/repos/$SELF_REPO/releases/latest" 2>/dev/null) || latest_json=""
+  else
+    latest_json=$(fetch_url "https://api.github.com/repos/$SELF_REPO/releases/latest" 2>/dev/null) || latest_json=""
+  fi
+  latest_tag=$(printf '%s' "$latest_json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
   if [ -z "$latest_tag" ]; then
-    error "Couldn't find a release for $SELF_REPO. Are you online?"
+    case "$latest_json" in
+      *"rate limit"* ) error "GitHub's API rate limit is used up for your IP right now - try again in an hour." ;;
+      *"Not Found"* )  error "No releases found for $SELF_REPO." ;;
+      * )              error "Couldn't reach GitHub for $SELF_REPO releases. Are you online?" ;;
+    esac
     exit 1
   fi
   new_script="$0.new.$$"
@@ -1394,6 +1426,20 @@ update_self() {
     rm -f "$new_script"
     error "The downloaded script failed a syntax check - not installing it."
     exit 1
+  fi
+  #Releases from v0.4.1 publish a checksum next to the script; verify when
+  #it's there (and this host can hash). Older releases simply don't have one.
+  expected_sha=$(fetch_url "https://github.com/$SELF_REPO/releases/download/$latest_tag/manage.sh.sha256" 2>/dev/null | awk 'NR==1{print $1}') || expected_sha=""
+  if [ -n "$expected_sha" ]; then
+    actual_sha=$(sha256_of "$new_script") || actual_sha=""
+    if [ -n "$actual_sha" ]; then
+      if [ "$actual_sha" != "$expected_sha" ]; then
+        rm -f "$new_script"
+        error "Checksum mismatch for the downloaded script (got $actual_sha, release says $expected_sha) - not installing it. Try again, and report this if it persists."
+        exit 1
+      fi
+      ok "Checksum verified"
+    fi
   fi
   #Carry the Apps/USERNAME configured in this copy across the update
   #(put them in manage.conf to avoid relying on this)

@@ -28,8 +28,17 @@ dead on the first broken app and said almost nothing about the rest.
   predictable name and permanently lock the tool. It records the owning pid,
   and a lock whose process is gone clears itself instead of demanding manual
   removal after a crash or reboot.
+- **Webhook payloads escape their content.** An app name or error message
+  containing a quote, backslash, tab or newline no longer breaks (or
+  rewrites) the JSON sent to `NOTIFY_WEBHOOK`.
+- **CI actions are pinned to commit SHAs** rather than floating tags.
 
 ### Added
+- **Releases carry a checksum, and `update-self` verifies it.** The release
+  workflow publishes `manage.sh.sha256` beside the notes; `update-self`
+  checks the downloaded script against it before installing (releases
+  without one - everything before 0.4.1 - still install as before).
+  `update-self` also now tells a GitHub rate-limit apart from being offline.
 - **A test suite.** `tests/run-tests.sh` drives `manage.sh` against a stub
   docker (no daemon needed) and asserts on exit codes, output and the exact
   docker actions taken - the state matrix, failure handling, backup/restore
