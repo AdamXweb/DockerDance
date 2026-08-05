@@ -212,6 +212,41 @@ assert_status 0
 assert_out "stale lock"
 assert_action "STOP:alpha"
 
+begin "restore: a date picks that archive; no date takes the newest"
+apps alpha
+mkdir -p "$SANDBOX/backup"
+echo "january" >"$SANDBOX/alpha/keep.txt"
+( cd "$SANDBOX" && tar -cjf "backup/alpha_2026-01-01.tar.bz2" alpha )
+sleep 1
+echo "february" >"$SANDBOX/alpha/keep.txt"
+( cd "$SANDBOX" && tar -cjf "backup/alpha_2026-02-02.tar.bz2" alpha )
+echo "clobbered" >"$SANDBOX/alpha/keep.txt"
+run restore --yes alpha 2026-01-01
+assert_status 0
+grep -qx "january" "$SANDBOX/alpha/keep.txt" && ok || fail "dated restore should pick the 2026-01-01 archive"
+run restore --yes alpha
+assert_status 0
+assert_out "older archive(s) also exist"
+grep -qx "february" "$SANDBOX/alpha/keep.txt" && ok || fail "undated restore should pick the newest archive"
+run restore --yes alpha 2030-12-31
+assert_status 1
+assert_out "No backup dated 2030-12-31"
+
+begin "prune: runs after update with --prune, not without"
+apps alpha
+printf 'alpha\n' >"$DD_STATE/up"
+run update --yes
+assert_no_action "PRUNE"
+run update --yes --prune
+assert_action "PRUNE"
+assert_out "reclaimed 42MB"
+
+begin "prune: standalone command"
+apps alpha
+run prune --yes
+assert_status 0
+assert_action "PRUNE"
+
 begin "missing app folder: reported, run continues"
 apps alpha gamma
 printf 'alpha\ngamma\n' >"$DD_STATE/up"

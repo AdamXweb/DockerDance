@@ -34,6 +34,15 @@ dead on the first broken app and said almost nothing about the rest.
 - **CI actions are pinned to commit SHAs** rather than floating tags.
 
 ### Added
+- **`prune` command and `--prune` flag.** Updating leaves the old images
+  behind as untagged "dangling" layers that quietly eat disk. `--prune` (or
+  `PRUNE_AFTER_UPDATE=1` in `manage.conf`) reclaims them right after an
+  update and reports the space freed; `./manage.sh prune` does it on demand.
+  Only dangling images are removed - tagged and shared images are untouched.
+- **Restore any archive, not just the newest.** `./manage.sh restore linkace
+  2026-08-01` picks the archive from that date (add `_HHMMSS` for same-day
+  backups); a bare `restore` still takes the newest and now mentions how
+  many older archives exist.
 - **Releases carry a checksum, and `update-self` verifies it.** The release
   workflow publishes `manage.sh.sha256` beside the notes; `update-self`
   checks the downloaded script against it before installing (releases

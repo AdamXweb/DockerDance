@@ -26,6 +26,12 @@ case "$1" in
     done <"$state/up" 2>/dev/null
     exit 0 ;;
   inspect ) echo "running"; exit 0 ;;
+  image )
+    #docker image prune -f
+    [ "$2" = "prune" ] || exit 0
+    echo "PRUNE" >>"$state/actions"
+    echo "Total reclaimed space: 42MB"
+    exit 0 ;;
   compose )
     shift
     app=$(basename "$(pwd)")

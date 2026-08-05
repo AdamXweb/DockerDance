@@ -3,7 +3,7 @@
 # (works when the tool is invoked as `manage.sh` or an `appmanage` alias).
 # Completes commands first, then app folder names in the current directory.
 
-set -l dd_cmds start stop restart update backup restore status logs version running doctor system-update update-self help
+set -l dd_cmds start stop restart update backup restore status logs version running prune doctor system-update update-self help
 
 for cmd in manage.sh appmanage
     # Commands (only as the first argument)
@@ -18,6 +18,7 @@ for cmd in manage.sh appmanage
     complete -c $cmd -f -n "not __fish_seen_subcommand_from $dd_cmds" -a version       -d 'Show image versions'
     complete -c $cmd -f -n "not __fish_seen_subcommand_from $dd_cmds" -a running       -d 'List running containers'
     complete -c $cmd -f -n "not __fish_seen_subcommand_from $dd_cmds" -a doctor        -d 'Check the environment'
+    complete -c $cmd -f -n "not __fish_seen_subcommand_from $dd_cmds" -a prune -d 'Remove dangling images'
     complete -c $cmd -f -n "not __fish_seen_subcommand_from $dd_cmds" -a system-update -d 'Update host OS packages'
     complete -c $cmd -f -n "not __fish_seen_subcommand_from $dd_cmds" -a update-self   -d 'Update this script'
     complete -c $cmd -f -n "not __fish_seen_subcommand_from $dd_cmds" -a help          -d 'Show help'

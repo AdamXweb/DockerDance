@@ -1073,10 +1073,26 @@ tar_is_busybox() {
 #checked for path-traversal, and only the '<app>/' subtree is promoted.
 restore_app() {
   app_start=$(date +%s)
-  archive=$(list_archives "$1" | head -1)
-  if [ -z "$archive" ]; then
-    error "No backups found for '$1' in $TARGET"
-    return 1
+  if [ -n "$RESTORE_DATE" ]; then
+    archive=$(list_archives "$1" | while IFS= read -r ra_f; do
+      #the balanced ( ) keeps this case parseable inside $( )
+      case "${ra_f##*/}" in ( *"$RESTORE_DATE"* ) printf '%s\n' "$ra_f" ;; esac
+    done | head -1)
+    if [ -z "$archive" ]; then
+      error "No backup dated $RESTORE_DATE for '$1' in $TARGET"
+      list_archives "$1" | sed 's|.*/|    |' >&2
+      return 1
+    fi
+  else
+    archive=$(list_archives "$1" | head -1)
+    if [ -z "$archive" ]; then
+      error "No backups found for '$1' in $TARGET"
+      return 1
+    fi
+    ra_count=$(list_archives "$1" | wc -l)
+    if [ "$ra_count" -gt 1 ]; then
+      echo "${dim}$((ra_count - 1)) older archive(s) also exist - pass a date to pick one, e.g. ./manage.sh restore $1 2026-08-01${normal}"
+    fi
   fi
   #Which layout is inside? New backups hold '<app>/...'; older (v0.1.0-era)
   #ones held absolute paths like '/home/x/docker_volumes/<app>/...'. Work out how many
@@ -1174,6 +1190,20 @@ restore_app() {
   leave_app
   ok "$(counter)$1 restored. Previous data kept at ${aside##*/} - delete it once you're happy"
   record "$1" "restored"
+}
+
+#Reclaim the old images an update leaves behind. Dangling images only
+#(docker's own default), so tagged and shared images are never touched.
+#PRUNE_AFTER_UPDATE=1 (or --prune) runs this automatically after update.
+PRUNE_AFTER_UPDATE="${PRUNE_AFTER_UPDATE:-}"
+prune_images() {
+  if [ -n "${DRY_RUN:-}" ]; then
+    echo "${dim}[dry-run]${normal} would: prune dangling images (docker image prune -f)"
+    return 0
+  fi
+  pr_out=$(docker image prune -f 2>&1) || { warn "Image prune failed: $pr_out"; return 0; }
+  pr_space=$(printf '%s\n' "$pr_out" | sed -n 's/^Total reclaimed space: *//p')
+  ok "Pruned dangling images${pr_space:+ - reclaimed $pr_space}"
 }
 
 #Update the host OS packages with whatever package manager is present.
@@ -1462,11 +1492,13 @@ Commands:
   restart      Stop apps, then start them again
   update       Pull the latest images, then restart apps on them
   backup       Pull, stop, tar app folders into the backup folder, then start again
-  restore      Put the newest backup archive back in place (current data is set aside)
+  restore      Put a backup archive back in place (current data is set aside);
+               newest by default, or add a date: restore linkace 2026-08-01
   status       Dashboard: each app's state, image and health at a glance
   logs         Show recent logs (follows the log when a single app is targeted)
   version      Show the image versions each app is using
   running      List running containers (docker ps)
+  prune        Remove dangling images left behind by updates
   doctor       Check the environment and configuration (read-only)
   system-update  Update the host OS packages (detects apt/dnf/yum/pacman/zypper/apk/brew; 'apt' still works as an alias)
   update-self  Update this script to the latest GitHub release
@@ -1478,6 +1510,7 @@ Options:
   --stopped=X  What update/backup do with apps that are already stopped:
                keep (default) leaves them stopped with their new image ready,
                start brings them up too, skip leaves them entirely alone
+  --prune      After update, remove dangling images (or PRUNE_AFTER_UPDATE=1)
   --no-color   Disable coloured output
 
 Commands run against every app in the Apps variable. The default, "auto",
@@ -1601,6 +1634,7 @@ run_command() {
         update_app "$app" || fail_app "$app"
       done
       finish_run "Updated" || run_status=1
+      [ -n "$PRUNE_AFTER_UPDATE" ] && prune_images
       notify "Update of $*: $RUN_RESULT"
       NOTIFY_CONTEXT=""
       ;;
@@ -1659,6 +1693,14 @@ run_command() {
       echo "Getting all running services"
       docker ps
       ;;
+    'prune' )
+      require_docker
+      if [ -z "${DRY_RUN:-}" ] && ! confirm "Remove dangling (untagged) images?"; then
+        echo "Cancelled."
+        return 0
+      fi
+      prune_images
+      ;;
     'system-update' | 'apt' )
       system_update
       ;;
@@ -1694,8 +1736,8 @@ status_dot() {
 }
 
 #Commands offered in the interactive menu, and the ones that don't take an app.
-MENU_COMMANDS="start stop restart update backup restore status logs version running system-update update-self doctor"
-NO_APP_COMMANDS="status running doctor system-update update-self"
+MENU_COMMANDS="start stop restart update backup restore status logs version running prune system-update update-self doctor"
+NO_APP_COMMANDS="status running doctor prune system-update update-self"
 
 #Pick a command for the interactive menu. Sets PICKED_COMMAND ("" = reprompt,
 #"quit" = leave). With fzf you get arrow-key navigation and type-to-filter and
@@ -1715,7 +1757,7 @@ pick_command() {
   echo "   1) start     2) stop      3) restart       4) update"
   echo "   5) backup    6) restore   7) status        8) logs"
   echo "   9) version  10) running  11) doctor       12) system-update"
-  echo "  13) update-self                             q) quit"
+  echo "  13) update-self 14) prune                   q) quit"
   echo "  ${dim}tip: install fzf for arrow-key navigation and filtering${normal}"
   printf "> "
   read -r choice || { PICKED_COMMAND="quit"; return 0; }
@@ -1733,8 +1775,9 @@ pick_command() {
     11 ) PICKED_COMMAND="doctor" ;;
     12 ) PICKED_COMMAND="system-update" ;;
     13 ) PICKED_COMMAND="update-self" ;;
+    14 ) PICKED_COMMAND="prune" ;;
     q | Q | quit | exit ) PICKED_COMMAND="quit" ;;
-    start | stop | restart | update | backup | restore | status | logs | version | running | doctor | system-update | update-self ) PICKED_COMMAND="$choice" ;;
+    start | stop | restart | update | backup | restore | status | logs | version | running | prune | doctor | system-update | update-self ) PICKED_COMMAND="$choice" ;;
     * ) echo "Not a valid choice." ;;
   esac
 }
@@ -1839,13 +1882,17 @@ interactive() {
 #command); everything else stays as the command and its app names.
 ASSUME_YES=""
 DRY_RUN=""
+RESTORE_DATE=""
 positional=""
 for arg in "$@"; do
   case "$arg" in
     -y | --yes ) ASSUME_YES=1 ;;
     --dry-run ) DRY_RUN=1 ;;
     --stopped=* ) STOPPED_POLICY=${arg#--stopped=}; STOPPED_SET=1 ;;
+    --prune ) PRUNE_AFTER_UPDATE=1 ;;
     --no-color ) bold=""; normal=""; red=""; green=""; yellow=""; cyan=""; dim="" ;;
+    #A date-shaped argument picks the archive for restore (never a valid app name)
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] | [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9] ) RESTORE_DATE=$arg ;;
     * ) positional="$positional $arg" ;;
   esac
 done

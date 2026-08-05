@@ -21,6 +21,7 @@ _dockerdance() {
     'version:Show image versions'
     'running:List running containers'
     'doctor:Check the environment (read-only)'
+    'prune:Remove dangling images'
     'system-update:Update host OS packages'
     'update-self:Update this script'
     'help:Show help'

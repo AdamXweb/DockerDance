@@ -7,7 +7,7 @@
 _dockerdance() {
   local cur commands flags
   cur=${COMP_WORDS[COMP_CWORD]}
-  commands="start stop restart update backup restore status logs version running doctor system-update update-self help"
+  commands="start stop restart update backup restore status logs version running prune doctor system-update update-self help"
   flags="--dry-run --yes --no-color --version --help"
   if [[ "$cur" == -* ]]; then
     mapfile -t COMPREPLY < <(compgen -W "$flags" -- "$cur")
