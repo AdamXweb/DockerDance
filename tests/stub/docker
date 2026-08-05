@@ -7,6 +7,7 @@
 #  $DD_STATE/up         apps whose container is running (one per line)
 #  $DD_STATE/fail-pull  apps whose `compose pull` should fail (one per line)
 #  $DD_STATE/fail-up    apps whose `compose up` should fail (one per line)
+#  $DD_STATE/unhealthy  apps whose containers report an unhealthy healthcheck
 #  $DD_STATE/actions    every state-changing call appends STOP:app / UP:app
 #  $DD_STATE/pulled     every successful pull appends its app name
 
@@ -25,7 +26,17 @@ case "$1" in
       esac
     done <"$state/up" 2>/dev/null
     exit 0 ;;
-  inspect ) echo "running"; exit 0 ;;
+  inspect )
+    #`docker inspect -f <fmt> <cid>`: the Health template answers from the
+    #unhealthy list; the plain Status template always says running
+    cid=""
+    for a in "$@"; do cid=$a; done
+    app=${cid#cid-}
+    case "$*" in
+      *Health* ) listed unhealthy "$app" && echo "unhealthy" ;;
+      * )        echo "running" ;;
+    esac
+    exit 0 ;;
   image )
     #docker image prune -f
     [ "$2" = "prune" ] || exit 0

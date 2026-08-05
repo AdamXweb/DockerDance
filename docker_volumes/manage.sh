@@ -588,9 +588,10 @@ print_summary() {
   printf '%s' "$SUMMARY" | while IFS='|' read -r s_app s_action s_secs; do
     [ -z "$s_app" ] && continue
     case "$s_action" in
-      failed )  s_mark="$red$DOT_OFF$normal" ;;
-      skipped ) s_mark="$yellow$DOT_OFF$normal" ;;
-      * )       s_mark="$green$DOT_ON$normal" ;;
+      failed )    s_mark="$red$DOT_OFF$normal" ;;
+      skipped )   s_mark="$yellow$DOT_OFF$normal" ;;
+      unhealthy ) s_mark="$yellow$DOT_ON$normal" ;;
+      * )         s_mark="$green$DOT_ON$normal" ;;
     esac
     printf '  %s %s%-24s%s %-12s %s%4ss%s\n' "$s_mark" "$bold" "$s_app" "$normal" "$s_action" "$dim" "$s_secs" "$normal"
   done
@@ -602,6 +603,7 @@ print_summary() {
 RUN_FAILED=""
 RUN_SKIPPED=""
 RUN_KEPT=""
+RUN_UNHEALTHY=""
 RUN_RESULT=""
 #$2 is the step that failed, used for the summary row
 fail_app() {
@@ -618,6 +620,16 @@ skip_app() {
   warn "$(counter)Skipping $1 ($2)"
   record "$1" "skipped"
   return 0
+}
+
+#Record an app's summary row: the caller's verb, unless the health wait just
+#flagged it - then the row says so.
+record_result() {
+  if in_list "$1" "$RUN_UNHEALTHY"; then
+    record "$1" "unhealthy"
+  else
+    record "$1" "$2"
+  fi
 }
 
 #The app was already stopped and the policy is to leave it that way. Its new
@@ -661,16 +673,17 @@ join_list() {
 #past-tense verb ("Updated"), $2 an optional note shown when all went well.
 finish_run() {
   print_summary
-  count_list "$RUN_FAILED";  fr_failed=$COUNTED
-  count_list "$RUN_SKIPPED"; fr_skipped=$COUNTED
-  count_list "$RUN_KEPT";    fr_kept=$COUNTED
+  count_list "$RUN_FAILED";    fr_failed=$COUNTED
+  count_list "$RUN_SKIPPED";   fr_skipped=$COUNTED
+  count_list "$RUN_KEPT";      fr_kept=$COUNTED
+  count_list "$RUN_UNHEALTHY"; fr_unhealthy=$COUNTED
   #Apps left stopped on purpose were handled as asked, so they count as done
-  fr_done=$((APP_TOTAL - fr_failed - fr_skipped))
+  fr_done=$((APP_TOTAL - fr_failed - fr_skipped - fr_unhealthy))
   fr_word="apps"
   [ "$APP_TOTAL" -eq 1 ] && fr_word="app"
   fr_kept_note=""
   [ "$fr_kept" -gt 0 ] && fr_kept_note=" ($fr_kept left stopped)"
-  if [ "$fr_failed" -eq 0 ] && [ "$fr_skipped" -eq 0 ]; then
+  if [ "$fr_failed" -eq 0 ] && [ "$fr_skipped" -eq 0 ] && [ "$fr_unhealthy" -eq 0 ]; then
     if [ "$APP_TOTAL" -eq 1 ]; then
       RUN_RESULT="$1 1 app in $(elapsed)$fr_kept_note"
     else
@@ -680,12 +693,14 @@ finish_run() {
     return 0
   fi
   fr_note=""
-  [ "$fr_failed" -gt 0 ]  && fr_note="$fr_failed failed"
-  [ "$fr_skipped" -gt 0 ] && fr_note="${fr_note:+$fr_note, }$fr_skipped skipped"
+  [ "$fr_failed" -gt 0 ]    && fr_note="$fr_failed failed"
+  [ "$fr_unhealthy" -gt 0 ] && fr_note="${fr_note:+$fr_note, }$fr_unhealthy unhealthy"
+  [ "$fr_skipped" -gt 0 ]   && fr_note="${fr_note:+$fr_note, }$fr_skipped skipped"
   RUN_RESULT="$1 $fr_done of $APP_TOTAL $fr_word in $(elapsed) - $fr_note$fr_kept_note"
   warn "$RUN_RESULT"
-  [ "$fr_failed" -gt 0 ]  && echo "  ${red}failed:${normal}  $(join_list "$RUN_FAILED")" >&2
-  [ "$fr_skipped" -gt 0 ] && echo "  ${yellow}skipped:${normal} $(join_list "$RUN_SKIPPED")" >&2
+  [ "$fr_failed" -gt 0 ]    && echo "  ${red}failed:${normal}    $(join_list "$RUN_FAILED")" >&2
+  [ "$fr_unhealthy" -gt 0 ] && echo "  ${yellow}unhealthy:${normal} $(join_list "$RUN_UNHEALTHY")" >&2
+  [ "$fr_skipped" -gt 0 ]   && echo "  ${yellow}skipped:${normal}   $(join_list "$RUN_SKIPPED")" >&2
   return 1
 }
 
@@ -928,6 +943,9 @@ wait_healthy() {
       fi
     fi
   else
+    #Started but not healthy: its own bucket in the closing tally, so cron
+    #and scripts hear about it - previously this warned and counted as done
+    RUN_UNHEALTHY="$RUN_UNHEALTHY $wh_app"
     if [ -n "$wh_verb" ]; then
       warn "$(counter)$wh_app $wh_verb, but $wh_result"
     else
@@ -944,7 +962,7 @@ start_app() {
   enter_app "$1" || return 1
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d || return 1
   wait_healthy "$1" "started"
-  record "$1" "started"
+  record_result "$1" "started"
   leave_app
 }
 
@@ -964,7 +982,7 @@ restart_app() {
   run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT" || return 1
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d || return 1
   wait_healthy "$1" "restarted"
-  record "$1" "restarted"
+  record_result "$1" "restarted"
   leave_app
 }
 
@@ -976,7 +994,7 @@ update_app() {
   run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT" || return 1
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d || return 1
   wait_healthy "$1" "updated and running"
-  record "$1" "updated"
+  record_result "$1" "updated"
   leave_app
 }
 
@@ -1028,7 +1046,7 @@ backup_app() {
   fi
   if [ "$was_up" -eq 1 ]; then
     wait_healthy "$1" "backed up, updated and running"
-    record "$1" "backed up"
+    record_result "$1" "backed up"
   else
     #wait_healthy would normally carry this line, but there's nothing to wait for
     [ -z "${DRY_RUN:-}" ] && ok "$(counter)$1 backed up, left stopped"
@@ -1533,6 +1551,7 @@ run_command() {
   RUN_FAILED=""
   RUN_SKIPPED=""
   RUN_KEPT=""
+  RUN_UNHEALTHY=""
   RUN_RESULT=""
   run_status=0
   case "$menu_command" in

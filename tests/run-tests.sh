@@ -53,7 +53,7 @@ apps() {
 #Run manage.sh in the sandbox with the stub docker first in PATH
 run() {
   ( cd "$SANDBOX" && \
-    PATH="$here/stub:$PATH" DOCKER_VOLUMES="$SANDBOX/" HEALTH_TIMEOUT=0 TERM=dumb \
+    PATH="$here/stub:$PATH" DOCKER_VOLUMES="$SANDBOX/" HEALTH_TIMEOUT="${TEST_HEALTH_TIMEOUT:-0}" TERM=dumb \
     sh manage.sh "$@" ) >"$OUT" 2>&1
   STATUS=$?
   [ -n "$VERBOSE" ] && { echo "--- $CURRENT: manage.sh $* (exit $STATUS)"; sed 's/^/    /' "$OUT"; }
@@ -97,8 +97,8 @@ run update --yes
 assert_status 1
 assert_out "1 failed"
 assert_out "1 skipped"
-assert_out "skipped: beta"
-assert_out "failed:  gamma"
+assert_out "skipped: *beta"
+assert_out "failed: *gamma"
 assert_action "UP:delta"          #the run reached the app after the failures
 assert_no_action "STOP:beta"      #skipped means untouched
 
@@ -247,12 +247,24 @@ run prune --yes
 assert_status 0
 assert_action "PRUNE"
 
+begin "unhealthy: its own bucket, non-zero exit"
+apps alpha beta
+printf 'alpha\nbeta\n' >"$DD_STATE/up"
+echo beta >"$DD_STATE/unhealthy"
+TEST_HEALTH_TIMEOUT=30 run update --yes
+assert_status 1
+assert_out "1 unhealthy"
+assert_out "unhealthy: beta"
+assert_out "Updated 1 of 2 apps"
+assert_action "UP:beta"     #it did start - health is what failed
+
 begin "missing app folder: reported, run continues"
+
 apps alpha gamma
 printf 'alpha\ngamma\n' >"$DD_STATE/up"
 run start alpha ghost gamma
 assert_status 1
-assert_out "failed:  ghost"
+assert_out "failed: *ghost"
 assert_action "UP:gamma"
 
 #--- summary -----------------------------------------------------------------

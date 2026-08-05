@@ -34,6 +34,10 @@ dead on the first broken app and said almost nothing about the rest.
 - **CI actions are pinned to commit SHAs** rather than floating tags.
 
 ### Added
+- **Apps that start but never turn healthy get their own tally bucket.**
+  `Updated 27 of 30 apps - 1 failed, 1 unhealthy, 1 skipped`, with the names
+  listed and a non-zero exit - previously an app that came up broken counted
+  as a success with only an inline warning, which cron never saw.
 - **`prune` command and `--prune` flag.** Updating leaves the old images
   behind as untagged "dangling" layers that quietly eat disk. `--prune` (or
   `PRUNE_AFTER_UPDATE=1` in `manage.conf`) reclaims them right after an
