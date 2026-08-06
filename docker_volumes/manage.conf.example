@@ -31,6 +31,16 @@
 # How many image pulls update/backup run at once. Set 1 for sequential pulls.
 #PARALLEL_PULLS="3"
 
+# What update/backup do with apps that are already stopped:
+#   keep  - leave them stopped, with their new image pulled and ready (default)
+#   start - update and start them, so everything ends up running
+#   skip  - leave them entirely alone, not even a pull
+#STOPPED_POLICY="keep"
+
+# Remove dangling (untagged) images after every update - the old images an
+# update leaves behind. Same as passing --prune.
+#PRUNE_AFTER_UPDATE="1"
+
 # Keep only the newest N backup archives per app (older ones are pruned after
 # each backup). Leave unset to keep every archive.
 #BACKUP_KEEP="7"

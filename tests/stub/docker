@@ -1,0 +1,72 @@
+#!/bin/sh
+#Stub docker for the test harness. No real docker needed: state is plain
+#files in $DD_STATE, so tests can declare which apps are "running", make
+#pulls or starts fail per app, and assert afterwards on exactly which
+#docker actions the script took.
+#
+#  $DD_STATE/up         apps whose container is running (one per line)
+#  $DD_STATE/fail-pull  apps whose `compose pull` should fail (one per line)
+#  $DD_STATE/fail-up    apps whose `compose up` should fail (one per line)
+#  $DD_STATE/unhealthy  apps whose containers report an unhealthy healthcheck
+#  $DD_STATE/actions    every state-changing call appends STOP:app / UP:app
+#  $DD_STATE/pulled     every successful pull appends its app name
+
+state="${DD_STATE:?DD_STATE not set}"
+listed() { grep -qx "$2" "$state/$1" 2>/dev/null; }
+
+case "$1" in
+  info ) exit 0 ;;
+  ps )
+    #`docker ps -q --no-trunc` (ids) or `docker ps --format '{{.Names}}'`
+    while IFS= read -r app; do
+      [ -n "$app" ] || continue
+      case "$*" in
+        *--format* ) echo "${app}-svc-1" ;;
+        * )          echo "cid-$app" ;;
+      esac
+    done <"$state/up" 2>/dev/null
+    exit 0 ;;
+  inspect )
+    #`docker inspect -f <fmt> <cid>`: the Health template answers from the
+    #unhealthy list; the plain Status template always says running
+    cid=""
+    for a in "$@"; do cid=$a; done
+    app=${cid#cid-}
+    case "$*" in
+      *Health* ) listed unhealthy "$app" && echo "unhealthy" ;;
+      * )        echo "running" ;;
+    esac
+    exit 0 ;;
+  image )
+    #docker image prune -f
+    [ "$2" = "prune" ] || exit 0
+    echo "PRUNE" >>"$state/actions"
+    echo "Total reclaimed space: 42MB"
+    exit 0 ;;
+  compose )
+    shift
+    app=$(basename "$(pwd)")
+    case "$1" in
+      version ) exit 0 ;;
+      ps ) echo "cid-$app"; exit 0 ;;
+      pull )
+        if listed fail-pull "$app"; then
+          echo "stub: pull failed for $app" >&2
+          exit 1
+        fi
+        echo "$app" >>"$state/pulled"
+        exit 0 ;;
+      stop )
+        echo "STOP:$app" >>"$state/actions"
+        exit 0 ;;
+      up )
+        if listed fail-up "$app"; then
+          echo "stub: up failed for $app" >&2
+          exit 1
+        fi
+        echo "UP:$app" >>"$state/actions"
+        exit 0 ;;
+      * ) exit 0 ;;
+    esac ;;
+esac
+exit 0

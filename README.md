@@ -51,6 +51,7 @@ To pin the set or the order instead, list the folders explicitly e.g. `Apps="lin
 `HEALTH_TIMEOUT` (default `60`) - after starting an app, seconds to wait for its containers to become healthy (or just running, if they have no healthcheck) before moving on. Set `0` to skip the wait entirely.
 `PARALLEL_PULLS` (default `3`) - how many image pulls `update`/`backup` keep in flight at once; as each one finishes the next app starts straight away. Set `1` for the old one-at-a-time behaviour.
 `BACKUP_KEEP` (unset by default) - when set to a number, only that many most-recent backup archives are kept per app; older ones are pruned after each backup.
+`PRUNE_AFTER_UPDATE` (unset by default) - set `1` to remove dangling images after every update, reclaiming the space the old images occupied (same as passing `--prune`).
 
 `NOTIFY_WEBHOOK` (unset by default) - a webhook URL (Slack and Discord formats both work) that gets a message when an update, backup or restore completes or fails. Handy for cron runs. See issue [#3](https://github.com/AdamXweb/DockerDance/issues/3).
 
@@ -69,6 +70,7 @@ Options that work with any command (before or after it):
 - `--dry-run` prints exactly what would happen — which apps get pulled, stopped, backed up, started — without touching anything.
 - `-y` / `--yes` skips confirmation prompts (so `update` and `restore` can run unattended).
 - `--stopped=keep|start|skip` decides what `update` and `backup` do with apps that are already stopped — see [Keeping apps as you found them](#keeping-apps-as-you-found-them).
+- `--prune` removes dangling images after an update; `--backup-first` archives each app before it moves to its new image.
 - `--no-color` turns off coloured output (as does setting `NO_COLOR`).
 
 ### Interactive menu
@@ -95,7 +97,7 @@ Starts all the apps by navigating through each folder and starting with `docker 
 
 ### Update
 `./manage.sh update`
-Pulls the latest images for all target apps **in parallel** (keeping `PARALLEL_PULLS` downloads in flight), then stops and recreates each container on the new image — so downtime is just the stop/start window, not the download. The pull phase names the apps it's downloading and counts them off, printing a line per app as it lands, so a long pull across many apps shows progress rather than a silent spinner. Apps that are already stopped stay stopped — their image is still pulled, so they come up current next time (see [Keeping apps as you found them](#keeping-apps-as-you-found-them)). On a terminal it asks for confirmation first (skip with `-y`); an app whose pull fails is left running on its current image and reported. After starting, it waits for each app to report healthy (see [Health](#health) below).
+Pulls the latest images for all target apps **in parallel** (keeping `PARALLEL_PULLS` downloads in flight), then stops and recreates each container on the new image — so downtime is just the stop/start window, not the download. The pull phase names the apps it's downloading and counts them off, printing a line per app as it lands, so a long pull across many apps shows progress rather than a silent spinner. Apps that are already stopped stay stopped — their image is still pulled, so they come up current next time (see [Keeping apps as you found them](#keeping-apps-as-you-found-them)). On a terminal it asks for confirmation first (skip with `-y`); an app whose pull fails is left running on its current image and reported. After starting, it waits for each app to report healthy (see [Health](#health) below). Add `--backup-first` to archive every app on the way through (the backup flow already restarts each app on its freshly pulled image), and `--prune` to reclaim the old images afterwards.
 
 ### Restart
 `./manage.sh restart`
@@ -107,6 +109,7 @@ An all-in-one per app: it pulls the latest images **while the app is still runni
 
 ### Restore
 `./manage.sh restore linkace`
+`./manage.sh restore linkace 2026-08-01`
 
 Puts the newest backup archive for the app back in place: stops the app, moves the current folder aside to `<app>.pre-restore.<timestamp>` (nothing is deleted), extracts the archive, and starts the app again. Asks for confirmation (needs a terminal, or pass `-y`). Older v0.1.0-era archives (absolute paths) are detected and restored too. Archives are treated as untrusted: extraction happens in an isolated staging area, any path-traversal (`..`) member is refused, and only the app's own folder is promoted — a tampered archive can't write elsewhere on disk.
 
@@ -153,7 +156,7 @@ Every run then closes with a per-app table and a tally of what actually made it:
   skipped: larapaper, pinchflat-X
 ```
 
-`skipped` means the app was left untouched (its image pull failed, so it stays on the image it has); `failed` means the command was attempted and didn't work. The script exits non-zero when either bucket is non-empty, so a cron job or wrapper script can tell without parsing the output. A `backup` whose archive fails still starts the app back up rather than leaving it stopped.
+`skipped` means the app was left untouched (its image pull failed, so it stays on the image it has); `failed` means the command was attempted and didn't work; `unhealthy` means the app started on its new image but never reported healthy within `HEALTH_TIMEOUT`. The script exits non-zero when any of those buckets is non-empty, so a cron job or wrapper script can tell without parsing the output. A `backup` whose archive fails still starts the app back up rather than leaving it stopped.
 
 #### Minor commands
 `./manage.sh version`

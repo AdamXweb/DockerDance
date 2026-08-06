@@ -14,7 +14,55 @@ workflow publishes it using this file's section for that version as the notes.
 Failure handling and feedback, largely shaped by a 30-app `update` that stopped
 dead on the first broken app and said almost nothing about the rest.
 
+### Security
+- **Backup archives are matched exactly, never by prefix.** When one app's
+  name was another's plus a digit (`vault` / `vault2`), the old glob let
+  `BACKUP_KEEP` pruning delete the *other* app's backups and `restore` pick
+  the wrong archive. New archives get a separator (`vault_2026-08-04.tar.bz2`);
+  both old and new names are still read, but only ever the right app's.
+- **Scratch files live in a private 0700 directory.** The step log was a
+  single mktemp'd file that the interactive menu deleted after each command,
+  freeing a known /tmp name another local user could squat with a symlink.
+- **The run lock moved out of /tmp** into the managed folder itself
+  (`.dockerdance.lock`), so another local user can no longer pre-create the
+  predictable name and permanently lock the tool. It records the owning pid,
+  and a lock whose process is gone clears itself instead of demanding manual
+  removal after a crash or reboot.
+- **Webhook payloads escape their content.** An app name or error message
+  containing a quote, backslash, tab or newline no longer breaks (or
+  rewrites) the JSON sent to `NOTIFY_WEBHOOK`.
+- **CI actions are pinned to commit SHAs** rather than floating tags.
+
 ### Added
+- **`update --backup-first`** archives every app on its way to the new image -
+  the backup flow already restarts each app on the freshly pulled image, so
+  this is the two commands composed, as one safety net.
+- **`doctor` checks more.** Free disk space where backups are written (they
+  fail late and messily when the disk fills mid-archive), and whether
+  `manage.conf` is writable by group/others - it is sourced as shell, so
+  write access to it is command execution.
+- **Apps that start but never turn healthy get their own tally bucket.**
+  `Updated 27 of 30 apps - 1 failed, 1 unhealthy, 1 skipped`, with the names
+  listed and a non-zero exit - previously an app that came up broken counted
+  as a success with only an inline warning, which cron never saw.
+- **`prune` command and `--prune` flag.** Updating leaves the old images
+  behind as untagged "dangling" layers that quietly eat disk. `--prune` (or
+  `PRUNE_AFTER_UPDATE=1` in `manage.conf`) reclaims them right after an
+  update and reports the space freed; `./manage.sh prune` does it on demand.
+  Only dangling images are removed - tagged and shared images are untouched.
+- **Restore any archive, not just the newest.** `./manage.sh restore linkace
+  2026-08-01` picks the archive from that date (add `_HHMMSS` for same-day
+  backups); a bare `restore` still takes the newest and now mentions how
+  many older archives exist.
+- **Releases carry a checksum, and `update-self` verifies it.** The release
+  workflow publishes `manage.sh.sha256` beside the notes; `update-self`
+  checks the downloaded script against it before installing (releases
+  without one - everything before 0.4.1 - still install as before).
+  `update-self` also now tells a GitHub rate-limit apart from being offline.
+- **A test suite.** `tests/run-tests.sh` drives `manage.sh` against a stub
+  docker (no daemon needed) and asserts on exit codes, output and the exact
+  docker actions taken - the state matrix, failure handling, backup/restore
+  roundtrips, archive collision and lock behaviour. CI runs it on every PR.
 - **Apps are put back the way they were found.** `update` and `backup` now
   check which apps are actually running before touching anything, show you
   the split, and leave stopped apps stopped - an app you deliberately shut

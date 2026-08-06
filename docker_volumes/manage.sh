@@ -67,20 +67,35 @@ case "$SPINNER_FRAMES" in
   * )  DOT_ON='*' DOT_OFF='-' ;;
 esac
 
-#mktemp gives an unpredictable, owner-only name so another user can't pre-create
-#it as a symlink and have root truncate a file through us. Fall back to the PID.
-STEP_LOG=$(mktemp "${TMPDIR:-/tmp}/dockerdance-step.XXXXXX" 2>/dev/null) || STEP_LOG="${TMPDIR:-/tmp}/dockerdance-step.$$.log"
-#One state-changing run at a time per docker_volumes folder (protects
-#against a cron backup overlapping a manual update)
-LOCK_DIR="${TMPDIR:-/tmp}/dockerdance$(pwd | tr '/ ' '__').lock"
+#All scratch files live in one owner-only (0700) directory, so no other user
+#can pre-create, replace or even see them. A single mktemp'd *file* wasn't
+#enough: the interactive menu deletes it after each command, freeing a name
+#another user had already seen - a symlink planted there would then have a
+#root-run step truncate whatever it pointed at.
+RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dockerdance.XXXXXX" 2>/dev/null) || {
+  RUN_DIR="${TMPDIR:-/tmp}/dockerdance.$$"
+  #No -p: if this predictable name already exists it isn't ours - stop.
+  mkdir -m 700 "$RUN_DIR" || { echo "Couldn't create a private temp dir at $RUN_DIR" >&2; exit 1; }
+}
+STEP_LOG="$RUN_DIR/step.log"
+#One state-changing run at a time per docker_volumes folder. The lock lives
+#in the (user-owned) folder being managed itself, not world-writable /tmp,
+#where any other local user could squat the predictable name and lock us out
+#for good. The pid inside lets a crashed run's lock clear itself.
+LOCK_DIR="$(pwd)/.dockerdance.lock"
 HAVE_LOCK=""
 NOTIFY_CONTEXT=""
+#Set (only) by the interactive menu's per-command subshell: its cleanup must
+#release the lock and restore the cursor, but the run dir belongs to the
+#session and has to survive into the next menu command.
+RUN_DIR_KEEP=""
 cleanup() {
   cleanup_status=$?
   tput cnorm 2>/dev/null || true
   rm -f "$STEP_LOG"
+  [ -z "$RUN_DIR_KEEP" ] && rm -rf "$RUN_DIR"
   if [ -n "$HAVE_LOCK" ]; then
-    rmdir "$LOCK_DIR" 2>/dev/null || true
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
   fi
   if [ "$cleanup_status" -ne 0 ] && [ -n "$NOTIFY_CONTEXT" ]; then
     notify "$NOTIFY_CONTEXT failed (exit $cleanup_status)"
@@ -93,9 +108,17 @@ trap 'exit 143' TERM
 #NOTIFY_WEBHOOK (optional, set in manage.conf or the environment): URL that
 #receives a message when update/backup/restore completes or fails. The JSON
 #payload suits Slack ("text") and Discord ("content") webhooks. Issue #3.
+#Escape the four characters that break a JSON string: \ " newline tab.
+#App names and error text flow into the webhook payload, so they can't go
+#in raw.
+json_escape() {
+  printf '%s' "$1" | awk 'BEGIN{ORS=""} NR>1{print "\\n"} {gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/,"\\t"); print}'
+}
+
 notify() {
   [ -z "${NOTIFY_WEBHOOK:-}" ] && return 0
-  notify_payload="{\"text\": \"DockerDance: $1\", \"content\": \"DockerDance: $1\"}"
+  notify_msg=$(json_escape "DockerDance: $1")
+  notify_payload="{\"text\": \"$notify_msg\", \"content\": \"$notify_msg\"}"
   if command -v curl >/dev/null 2>&1; then
     curl -fsS -m 10 -H 'Content-Type: application/json' -d "$notify_payload" "$NOTIFY_WEBHOOK" >/dev/null 2>&1 || warn "Webhook notification failed"
   elif command -v wget >/dev/null 2>&1; then
@@ -206,9 +229,21 @@ run_step() {
 acquire_lock() {
   [ -n "$HAVE_LOCK" ] && return 0
   if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    error "Another manage.sh run appears to be active here (lock: $LOCK_DIR). Remove that folder if it's stale."
-    exit 1
+    #A lock whose recorded process is gone is left over from a crash or a
+    #reboot - clear it and try once more. (kill -0 can't tell a foreign
+    #user's live process from a dead one, but the lock sits inside this
+    #user's own docker_volumes folder, so that ambiguity doesn't arise.)
+    al_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null)
+    if [ -n "$al_pid" ] && ! kill -0 "$al_pid" 2>/dev/null; then
+      warn "Clearing a stale lock left by exited run (pid $al_pid)"
+      rm -rf "$LOCK_DIR"
+    fi
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+      error "Another manage.sh run is active here (lock: $LOCK_DIR, pid ${al_pid:-unknown})."
+      exit 1
+    fi
   fi
+  echo "$$" >"$LOCK_DIR/pid"
   HAVE_LOCK=1
 }
 
@@ -553,9 +588,10 @@ print_summary() {
   printf '%s' "$SUMMARY" | while IFS='|' read -r s_app s_action s_secs; do
     [ -z "$s_app" ] && continue
     case "$s_action" in
-      failed )  s_mark="$red$DOT_OFF$normal" ;;
-      skipped ) s_mark="$yellow$DOT_OFF$normal" ;;
-      * )       s_mark="$green$DOT_ON$normal" ;;
+      failed )    s_mark="$red$DOT_OFF$normal" ;;
+      skipped )   s_mark="$yellow$DOT_OFF$normal" ;;
+      unhealthy ) s_mark="$yellow$DOT_ON$normal" ;;
+      * )         s_mark="$green$DOT_ON$normal" ;;
     esac
     printf '  %s %s%-24s%s %-12s %s%4ss%s\n' "$s_mark" "$bold" "$s_app" "$normal" "$s_action" "$dim" "$s_secs" "$normal"
   done
@@ -567,6 +603,7 @@ print_summary() {
 RUN_FAILED=""
 RUN_SKIPPED=""
 RUN_KEPT=""
+RUN_UNHEALTHY=""
 RUN_RESULT=""
 #$2 is the step that failed, used for the summary row
 fail_app() {
@@ -583,6 +620,16 @@ skip_app() {
   warn "$(counter)Skipping $1 ($2)"
   record "$1" "skipped"
   return 0
+}
+
+#Record an app's summary row: the caller's verb, unless the health wait just
+#flagged it - then the row says so.
+record_result() {
+  if in_list "$1" "$RUN_UNHEALTHY"; then
+    record "$1" "unhealthy"
+  else
+    record "$1" "$2"
+  fi
 }
 
 #The app was already stopped and the policy is to leave it that way. Its new
@@ -626,16 +673,17 @@ join_list() {
 #past-tense verb ("Updated"), $2 an optional note shown when all went well.
 finish_run() {
   print_summary
-  count_list "$RUN_FAILED";  fr_failed=$COUNTED
-  count_list "$RUN_SKIPPED"; fr_skipped=$COUNTED
-  count_list "$RUN_KEPT";    fr_kept=$COUNTED
+  count_list "$RUN_FAILED";    fr_failed=$COUNTED
+  count_list "$RUN_SKIPPED";   fr_skipped=$COUNTED
+  count_list "$RUN_KEPT";      fr_kept=$COUNTED
+  count_list "$RUN_UNHEALTHY"; fr_unhealthy=$COUNTED
   #Apps left stopped on purpose were handled as asked, so they count as done
-  fr_done=$((APP_TOTAL - fr_failed - fr_skipped))
+  fr_done=$((APP_TOTAL - fr_failed - fr_skipped - fr_unhealthy))
   fr_word="apps"
   [ "$APP_TOTAL" -eq 1 ] && fr_word="app"
   fr_kept_note=""
   [ "$fr_kept" -gt 0 ] && fr_kept_note=" ($fr_kept left stopped)"
-  if [ "$fr_failed" -eq 0 ] && [ "$fr_skipped" -eq 0 ]; then
+  if [ "$fr_failed" -eq 0 ] && [ "$fr_skipped" -eq 0 ] && [ "$fr_unhealthy" -eq 0 ]; then
     if [ "$APP_TOTAL" -eq 1 ]; then
       RUN_RESULT="$1 1 app in $(elapsed)$fr_kept_note"
     else
@@ -645,12 +693,14 @@ finish_run() {
     return 0
   fi
   fr_note=""
-  [ "$fr_failed" -gt 0 ]  && fr_note="$fr_failed failed"
-  [ "$fr_skipped" -gt 0 ] && fr_note="${fr_note:+$fr_note, }$fr_skipped skipped"
+  [ "$fr_failed" -gt 0 ]    && fr_note="$fr_failed failed"
+  [ "$fr_unhealthy" -gt 0 ] && fr_note="${fr_note:+$fr_note, }$fr_unhealthy unhealthy"
+  [ "$fr_skipped" -gt 0 ]   && fr_note="${fr_note:+$fr_note, }$fr_skipped skipped"
   RUN_RESULT="$1 $fr_done of $APP_TOTAL $fr_word in $(elapsed) - $fr_note$fr_kept_note"
   warn "$RUN_RESULT"
-  [ "$fr_failed" -gt 0 ]  && echo "  ${red}failed:${normal}  $(join_list "$RUN_FAILED")" >&2
-  [ "$fr_skipped" -gt 0 ] && echo "  ${yellow}skipped:${normal} $(join_list "$RUN_SKIPPED")" >&2
+  [ "$fr_failed" -gt 0 ]    && echo "  ${red}failed:${normal}    $(join_list "$RUN_FAILED")" >&2
+  [ "$fr_unhealthy" -gt 0 ] && echo "  ${yellow}unhealthy:${normal} $(join_list "$RUN_UNHEALTHY")" >&2
+  [ "$fr_skipped" -gt 0 ]   && echo "  ${yellow}skipped:${normal}   $(join_list "$RUN_SKIPPED")" >&2
   return 1
 }
 
@@ -893,6 +943,9 @@ wait_healthy() {
       fi
     fi
   else
+    #Started but not healthy: its own bucket in the closing tally, so cron
+    #and scripts hear about it - previously this warned and counted as done
+    RUN_UNHEALTHY="$RUN_UNHEALTHY $wh_app"
     if [ -n "$wh_verb" ]; then
       warn "$(counter)$wh_app $wh_verb, but $wh_result"
     else
@@ -909,7 +962,7 @@ start_app() {
   enter_app "$1" || return 1
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d || return 1
   wait_healthy "$1" "started"
-  record "$1" "started"
+  record_result "$1" "started"
   leave_app
 }
 
@@ -929,7 +982,7 @@ restart_app() {
   run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT" || return 1
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d || return 1
   wait_healthy "$1" "restarted"
-  record "$1" "restarted"
+  record_result "$1" "restarted"
   leave_app
 }
 
@@ -941,7 +994,7 @@ update_app() {
   run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT" || return 1
   run_step "$(counter)Starting ${bold}$1${normal}" compose up -d || return 1
   wait_healthy "$1" "updated and running"
-  record "$1" "updated"
+  record_result "$1" "updated"
   leave_app
 }
 
@@ -960,12 +1013,12 @@ backup_app() {
   if [ "$was_up" -eq 1 ] && in_list "$1" "$APPS_UP"; then
     run_step "$(counter)Stopping ${bold}$1${normal}" compose stop -t "$STOP_TIMEOUT" || return 1
   fi
-  archive="${TARGET}${1}$(date '+%Y-%m-%d').tar.bz2"
+  archive="${TARGET}${1}_$(date '+%Y-%m-%d').tar.bz2"
   if [ -z "${DRY_RUN:-}" ]; then
     mkdir -p "$TARGET"
     if [ -e "$archive" ]; then
       warn "${archive##*/} already exists - keeping it and adding a timestamp to this one"
-      archive="${TARGET}${1}$(date '+%Y-%m-%d_%H%M%S').tar.bz2"
+      archive="${TARGET}${1}_$(date '+%Y-%m-%d_%H%M%S').tar.bz2"
     fi
   fi
   #Relative paths inside the archive make restores portable; 600 keeps the
@@ -975,8 +1028,7 @@ backup_app() {
   if [ "$archive_status" -eq 0 ] && [ -z "${DRY_RUN:-}" ]; then
     chmod 600 "$archive"
     if [ -n "${BACKUP_KEEP:-}" ]; then
-      # shellcheck disable=SC2012 # archive names are script-generated (no spaces/newlines)
-      ls -1t "${TARGET}${1}"[0-9]*.tar.bz2 2>/dev/null | tail -n +"$((BACKUP_KEEP + 1))" | while IFS= read -r old_backup; do
+      list_archives "$1" | tail -n +"$((BACKUP_KEEP + 1))" | while IFS= read -r old_backup; do
         rm -f "$old_backup"
         warn "Pruned old backup ${old_backup##*/} (BACKUP_KEEP=$BACKUP_KEEP)"
       done
@@ -994,7 +1046,7 @@ backup_app() {
   fi
   if [ "$was_up" -eq 1 ]; then
     wait_healthy "$1" "backed up, updated and running"
-    record "$1" "backed up"
+    record_result "$1" "backed up"
   else
     #wait_healthy would normally carry this line, but there's nothing to wait for
     [ -z "${DRY_RUN:-}" ] && ok "$(counter)$1 backed up, left stopped"
@@ -1002,6 +1054,27 @@ backup_app() {
     record "$1" "backed up"
   fi
   leave_app
+}
+
+#Newest-first list of $1's own backup archives. The name after the app part
+#must be exactly a date (with an optional _HHMMSS), in either the current
+#'app_YYYY-MM-DD' form or the pre-0.4.1 'appYYYY-MM-DD' form - so an app
+#whose name extends another's (vault / vault2) never matches its neighbour's
+#archives. A bare glob did, which let BACKUP_KEEP prune the wrong app's
+#backups and restore pick the wrong archive.
+list_archives() {
+  # shellcheck disable=SC2012 # archive names are script-generated (no newlines); ls -t sorts newest first
+  ls -1t "${TARGET}${1}"*.tar.bz2 2>/dev/null | while IFS= read -r la_f; do
+    la_s=${la_f##*/}
+    la_s=${la_s#"$1"}
+    case "$la_s" in
+      _[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].tar.bz2 | \
+      _[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9].tar.bz2 | \
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].tar.bz2 | \
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9].tar.bz2 )
+        printf '%s\n' "$la_f" ;;
+    esac
+  done
 }
 
 tar_is_busybox() {
@@ -1018,11 +1091,26 @@ tar_is_busybox() {
 #checked for path-traversal, and only the '<app>/' subtree is promoted.
 restore_app() {
   app_start=$(date +%s)
-  # shellcheck disable=SC2012 # archive names are script-generated (no spaces/newlines)
-  archive=$(ls -1t "${TARGET}${1}"[0-9]*.tar.bz2 2>/dev/null | head -1)
-  if [ -z "$archive" ]; then
-    error "No backups found for '$1' in $TARGET"
-    return 1
+  if [ -n "$RESTORE_DATE" ]; then
+    archive=$(list_archives "$1" | while IFS= read -r ra_f; do
+      #the balanced ( ) keeps this case parseable inside $( )
+      case "${ra_f##*/}" in ( *"$RESTORE_DATE"* ) printf '%s\n' "$ra_f" ;; esac
+    done | head -1)
+    if [ -z "$archive" ]; then
+      error "No backup dated $RESTORE_DATE for '$1' in $TARGET"
+      list_archives "$1" | sed 's|.*/|    |' >&2
+      return 1
+    fi
+  else
+    archive=$(list_archives "$1" | head -1)
+    if [ -z "$archive" ]; then
+      error "No backups found for '$1' in $TARGET"
+      return 1
+    fi
+    ra_count=$(list_archives "$1" | wc -l)
+    if [ "$ra_count" -gt 1 ]; then
+      echo "${dim}$((ra_count - 1)) older archive(s) also exist - pass a date to pick one, e.g. ./manage.sh restore $1 2026-08-01${normal}"
+    fi
   fi
   #Which layout is inside? New backups hold '<app>/...'; older (v0.1.0-era)
   #ones held absolute paths like '/home/x/docker_volumes/<app>/...'. Work out how many
@@ -1120,6 +1208,20 @@ restore_app() {
   leave_app
   ok "$(counter)$1 restored. Previous data kept at ${aside##*/} - delete it once you're happy"
   record "$1" "restored"
+}
+
+#Reclaim the old images an update leaves behind. Dangling images only
+#(docker's own default), so tagged and shared images are never touched.
+#PRUNE_AFTER_UPDATE=1 (or --prune) runs this automatically after update.
+PRUNE_AFTER_UPDATE="${PRUNE_AFTER_UPDATE:-}"
+prune_images() {
+  if [ -n "${DRY_RUN:-}" ]; then
+    echo "${dim}[dry-run]${normal} would: prune dangling images (docker image prune -f)"
+    return 0
+  fi
+  pr_out=$(docker image prune -f 2>&1) || { warn "Image prune failed: $pr_out"; return 0; }
+  pr_space=$(printf '%s\n' "$pr_out" | sed -n 's/^Total reclaimed space: *//p')
+  ok "Pruned dangling images${pr_space:+ - reclaimed $pr_space}"
 }
 
 #Update the host OS packages with whatever package manager is present.
@@ -1278,12 +1380,33 @@ run_doctor() {
     dwarn "DOCKER_VOLUMES does not exist: $DOCKER_VOLUMES"
   fi
   if [ -f "./manage.conf" ]; then
-    dok "manage.conf found and loaded"
+    #sourced as shell, so write access to it is command execution as this user
+    # shellcheck disable=SC2012 # a fixed, known filename - ls is fine
+    dr_confperm=$(ls -l "./manage.conf" | cut -c1-10)
+    case "$dr_confperm" in
+      ?????w* | ????????w? ) dwarn "manage.conf is writable by group/others ($dr_confperm) - it runs as shell, tighten it: chmod 644 manage.conf" ;;
+      * ) dok "manage.conf found and loaded" ;;
+    esac
   else
     echo "  manage.conf: not present (using script defaults / environment)"
   fi
+  #Backups fail late and messily when the disk fills mid-archive
+  dr_avail_kb=$(df -Pk "${TARGET%/}" 2>/dev/null | awk 'NR==2{print $4}')
+  [ -n "$dr_avail_kb" ] || dr_avail_kb=$(df -Pk "$DOCKER_VOLUMES" 2>/dev/null | awk 'NR==2{print $4}')
+  if [ -n "$dr_avail_kb" ]; then
+    if [ "$dr_avail_kb" -lt 1048576 ] 2>/dev/null; then
+      dwarn "Only $((dr_avail_kb / 1024))MB free where backups are written ($TARGET)"
+    else
+      dok "Free space for backups: $((dr_avail_kb / 1024 / 1024))GB in $TARGET"
+    fi
+  fi
   if [ -d "$LOCK_DIR" ]; then
-    dwarn "A run lock exists ($LOCK_DIR) - another run is active, or it's stale (remove it if so)"
+    dr_lockpid=$(cat "$LOCK_DIR/pid" 2>/dev/null)
+    if [ -n "$dr_lockpid" ] && kill -0 "$dr_lockpid" 2>/dev/null; then
+      dwarn "A run lock is held by an active run (pid $dr_lockpid)"
+    else
+      dwarn "A stale run lock exists ($LOCK_DIR) - the next state-changing command will clear it"
+    fi
   else
     dok "No stale run lock"
   fi
@@ -1315,11 +1438,35 @@ fetch_url() {
   fi
 }
 
+#SHA-256 of a file with whatever tool the host has; fails quietly when none.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 -r "$1" | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
 update_self() {
   actioninfo "Checking the latest ${bold}$SELF_REPO${normal} release"
-  latest_tag=$(fetch_url "https://api.github.com/repos/$SELF_REPO/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+  #Fetched without curl's -f so an error body (rate limit, not found) can be
+  #told apart from actually being offline
+  if command -v curl >/dev/null 2>&1; then
+    latest_json=$(curl -sSL "https://api.github.com/repos/$SELF_REPO/releases/latest" 2>/dev/null) || latest_json=""
+  else
+    latest_json=$(fetch_url "https://api.github.com/repos/$SELF_REPO/releases/latest" 2>/dev/null) || latest_json=""
+  fi
+  latest_tag=$(printf '%s' "$latest_json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
   if [ -z "$latest_tag" ]; then
-    error "Couldn't find a release for $SELF_REPO. Are you online?"
+    case "$latest_json" in
+      *"rate limit"* ) error "GitHub's API rate limit is used up for your IP right now - try again in an hour." ;;
+      *"Not Found"* )  error "No releases found for $SELF_REPO." ;;
+      * )              error "Couldn't reach GitHub for $SELF_REPO releases. Are you online?" ;;
+    esac
     exit 1
   fi
   new_script="$0.new.$$"
@@ -1344,6 +1491,20 @@ update_self() {
     error "The downloaded script failed a syntax check - not installing it."
     exit 1
   fi
+  #Releases from v0.4.1 publish a checksum next to the script; verify when
+  #it's there (and this host can hash). Older releases simply don't have one.
+  expected_sha=$(fetch_url "https://github.com/$SELF_REPO/releases/download/$latest_tag/manage.sh.sha256" 2>/dev/null | awk 'NR==1{print $1}') || expected_sha=""
+  if [ -n "$expected_sha" ]; then
+    actual_sha=$(sha256_of "$new_script") || actual_sha=""
+    if [ -n "$actual_sha" ]; then
+      if [ "$actual_sha" != "$expected_sha" ]; then
+        rm -f "$new_script"
+        error "Checksum mismatch for the downloaded script (got $actual_sha, release says $expected_sha) - not installing it. Try again, and report this if it persists."
+        exit 1
+      fi
+      ok "Checksum verified"
+    fi
+  fi
   #Carry the Apps/USERNAME configured in this copy across the update
   #(put them in manage.conf to avoid relying on this)
   sed "s|^Apps=\".*\"|Apps=\"$ORIGINAL_APPS\"|; s|^USERNAME=\".*\"|USERNAME=\"$USERNAME\"|" "$new_script" > "$new_script.tmp"
@@ -1365,11 +1526,13 @@ Commands:
   restart      Stop apps, then start them again
   update       Pull the latest images, then restart apps on them
   backup       Pull, stop, tar app folders into the backup folder, then start again
-  restore      Put the newest backup archive back in place (current data is set aside)
+  restore      Put a backup archive back in place (current data is set aside);
+               newest by default, or add a date: restore linkace 2026-08-01
   status       Dashboard: each app's state, image and health at a glance
   logs         Show recent logs (follows the log when a single app is targeted)
   version      Show the image versions each app is using
   running      List running containers (docker ps)
+  prune        Remove dangling images left behind by updates
   doctor       Check the environment and configuration (read-only)
   system-update  Update the host OS packages (detects apt/dnf/yum/pacman/zypper/apk/brew; 'apt' still works as an alias)
   update-self  Update this script to the latest GitHub release
@@ -1381,6 +1544,8 @@ Options:
   --stopped=X  What update/backup do with apps that are already stopped:
                keep (default) leaves them stopped with their new image ready,
                start brings them up too, skip leaves them entirely alone
+  --prune      After update, remove dangling images (or PRUNE_AFTER_UPDATE=1)
+  --backup-first  Archive each app before it moves to the new image (update)
   --no-color   Disable coloured output
 
 Commands run against every app in the Apps variable. The default, "auto",
@@ -1391,6 +1556,12 @@ EOF
 
 run_command() {
   menu_command=$1
+  #backup already ends each app on the freshly pulled image, so an update
+  #with a safety archive first is exactly the backup flow
+  if [ "$menu_command" = "update" ] && [ -n "$BACKUP_FIRST" ]; then
+    echo "--backup-first: each app is archived, then started on its new image"
+    menu_command="backup"
+  fi
   case "$menu_command" in
     'backup' | 'restore' | 'update' | 'stop' | 'start' | 'restart' | 'logs' | 'version' | 'status' ) maybe_discover_apps ;;
   esac
@@ -1403,6 +1574,7 @@ run_command() {
   RUN_FAILED=""
   RUN_SKIPPED=""
   RUN_KEPT=""
+  RUN_UNHEALTHY=""
   RUN_RESULT=""
   run_status=0
   case "$menu_command" in
@@ -1504,6 +1676,7 @@ run_command() {
         update_app "$app" || fail_app "$app"
       done
       finish_run "Updated" || run_status=1
+      [ -n "$PRUNE_AFTER_UPDATE" ] && prune_images
       notify "Update of $*: $RUN_RESULT"
       NOTIFY_CONTEXT=""
       ;;
@@ -1562,6 +1735,14 @@ run_command() {
       echo "Getting all running services"
       docker ps
       ;;
+    'prune' )
+      require_docker
+      if [ -z "${DRY_RUN:-}" ] && ! confirm "Remove dangling (untagged) images?"; then
+        echo "Cancelled."
+        return 0
+      fi
+      prune_images
+      ;;
     'system-update' | 'apt' )
       system_update
       ;;
@@ -1597,8 +1778,8 @@ status_dot() {
 }
 
 #Commands offered in the interactive menu, and the ones that don't take an app.
-MENU_COMMANDS="start stop restart update backup restore status logs version running system-update update-self doctor"
-NO_APP_COMMANDS="status running doctor system-update update-self"
+MENU_COMMANDS="start stop restart update backup restore status logs version running prune system-update update-self doctor"
+NO_APP_COMMANDS="status running doctor prune system-update update-self"
 
 #Pick a command for the interactive menu. Sets PICKED_COMMAND ("" = reprompt,
 #"quit" = leave). With fzf you get arrow-key navigation and type-to-filter and
@@ -1618,7 +1799,7 @@ pick_command() {
   echo "   1) start     2) stop      3) restart       4) update"
   echo "   5) backup    6) restore   7) status        8) logs"
   echo "   9) version  10) running  11) doctor       12) system-update"
-  echo "  13) update-self                             q) quit"
+  echo "  13) update-self 14) prune                   q) quit"
   echo "  ${dim}tip: install fzf for arrow-key navigation and filtering${normal}"
   printf "> "
   read -r choice || { PICKED_COMMAND="quit"; return 0; }
@@ -1636,8 +1817,9 @@ pick_command() {
     11 ) PICKED_COMMAND="doctor" ;;
     12 ) PICKED_COMMAND="system-update" ;;
     13 ) PICKED_COMMAND="update-self" ;;
+    14 ) PICKED_COMMAND="prune" ;;
     q | Q | quit | exit ) PICKED_COMMAND="quit" ;;
-    start | stop | restart | update | backup | restore | status | logs | version | running | doctor | system-update | update-self ) PICKED_COMMAND="$choice" ;;
+    start | stop | restart | update | backup | restore | status | logs | version | running | prune | doctor | system-update | update-self ) PICKED_COMMAND="$choice" ;;
     * ) echo "Not a valid choice." ;;
   esac
 }
@@ -1729,7 +1911,7 @@ interactive() {
     #Run in a subshell so one failed command reports and returns to the menu
     #instead of ending the whole session under set -e
     set +e
-    ( set -e; trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM; run_command "$choice" )
+    ( set -e; RUN_DIR_KEEP=1; trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM; run_command "$choice" )
     menu_status=$?
     set -e
     if [ "$menu_status" -ne 0 ]; then
@@ -1742,13 +1924,19 @@ interactive() {
 #command); everything else stays as the command and its app names.
 ASSUME_YES=""
 DRY_RUN=""
+RESTORE_DATE=""
+BACKUP_FIRST=""
 positional=""
 for arg in "$@"; do
   case "$arg" in
     -y | --yes ) ASSUME_YES=1 ;;
     --dry-run ) DRY_RUN=1 ;;
     --stopped=* ) STOPPED_POLICY=${arg#--stopped=}; STOPPED_SET=1 ;;
+    --prune ) PRUNE_AFTER_UPDATE=1 ;;
+    --backup-first ) BACKUP_FIRST=1 ;;
     --no-color ) bold=""; normal=""; red=""; green=""; yellow=""; cyan=""; dim="" ;;
+    #A date-shaped argument picks the archive for restore (never a valid app name)
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] | [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9] ) RESTORE_DATE=$arg ;;
     * ) positional="$positional $arg" ;;
   esac
 done
