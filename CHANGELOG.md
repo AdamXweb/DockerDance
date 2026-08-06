@@ -27,7 +27,9 @@ dead on the first broken app and said almost nothing about the rest.
   (`.dockerdance.lock`), so another local user can no longer pre-create the
   predictable name and permanently lock the tool. It records the owning pid,
   and a lock whose process is gone clears itself instead of demanding manual
-  removal after a crash or reboot.
+  removal after a crash or reboot. Liveness is checked with `ps` rather than
+  `kill -0`, which cannot see another user's process and would otherwise
+  declare their running job dead and take the lock from under it.
 - **Webhook payloads escape their content.** An app name or error message
   containing a quote, backslash, tab or newline no longer breaks (or
   rewrites) the JSON sent to `NOTIFY_WEBHOOK`.
@@ -56,8 +58,9 @@ dead on the first broken app and said almost nothing about the rest.
   many older archives exist.
 - **Releases carry a checksum, and `update-self` verifies it.** The release
   workflow publishes `manage.sh.sha256` beside the notes; `update-self`
-  checks the downloaded script against it before installing (releases
-  without one - everything before 0.4.1 - still install as before).
+  checks the downloaded script against it before installing (0.4.0 is the
+  first release to carry one; older releases without it still install as
+  before).
   `update-self` also now tells a GitHub rate-limit apart from being offline.
 - **A test suite.** `tests/run-tests.sh` drives `manage.sh` against a stub
   docker (no daemon needed) and asserts on exit codes, output and the exact
@@ -106,6 +109,11 @@ dead on the first broken app and said almost nothing about the rest.
 - A `PARALLEL_PULLS` of `0`, a negative or a typo left the pull orchestrator
   with no slot it could ever fill, hanging the run; it now falls back to the
   default of 3.
+- A lock directory with no readable pid inside - left by a run killed between
+  creating the lock and recording its owner, or by a full disk - made every
+  state-changing command exit 1 with no output whatsoever, and cut `doctor`'s
+  report off mid-way. Such a lock is now reported (and left alone, since
+  there is no owner to judge) instead of aborting the script.
 
 ## [0.3.0] - 2026-07-13
 
