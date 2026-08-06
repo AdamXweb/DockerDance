@@ -38,7 +38,7 @@ DockerDance is just the single `manage.sh` file. Download it **into your `docker
 | **curl**  | `curl -fsSL https://raw.githubusercontent.com/AdamXweb/DockerDance/main/docker_volumes/manage.sh -o manage.sh && chmod +x manage.sh` |
 | **wget**  | `wget -O manage.sh https://raw.githubusercontent.com/AdamXweb/DockerDance/main/docker_volumes/manage.sh && chmod +x manage.sh` |
 
-Then run `./manage.sh` for the interactive menu, or `./manage.sh help` for the command list. You can also pin a specific version [from the releases](https://github.com/AdamXweb/DockerDance/releases); `./manage.sh update-self` updates it to the latest release later. (Prefer git? `git clone https://github.com/AdamXweb/DockerDance.git .` into your user folder gives you the whole `docker_volumes` layout.)
+Then run `./manage.sh` for the interactive menu, or `./manage.sh help` for the command list. You can also pin a specific version [from the releases](https://github.com/AdamXweb/DockerDance/releases) — from v0.4.1 each release carries `manage.sh` and a `manage.sh.sha256` you can check it against; `./manage.sh update-self` updates it to the latest release later. (Prefer git? `git clone https://github.com/AdamXweb/DockerDance.git .` into your user folder gives you the whole `docker_volumes` layout.)
 
 
 #### Customise variables

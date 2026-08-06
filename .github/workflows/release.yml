@@ -1,8 +1,16 @@
 name: Release
 
-# Pushing a v* tag publishes the release, using that version's CHANGELOG
-# section as the notes. Tagging stays the only manual step:
-#   git tag v0.4.0 && git push origin v0.4.0
+# Pushing a v* tag attaches manage.sh and its checksum to that version's
+# release. Either order works:
+#
+#   * write the release in the GitHub UI first, then push the tag - the
+#     workflow adds the files and leaves your title and notes alone;
+#   * or push the tag first and let the workflow create the release, with
+#     that version's CHANGELOG section as a starting point for the notes.
+#
+#   git tag -a v0.5.0 -m v0.5.0 && git push origin v0.5.0
+#
+# Re-running is always safe: assets are replaced, notes are never rewritten.
 
 on:
   push:
@@ -50,8 +58,20 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        # The sha256 asset lets update-self verify its download; the file is
-        # named for how it lands ("manage.sh"), not its repo path.
+        # Assets are named for how they land ("manage.sh"), not their repo
+        # path, so the download URL reads sensibly and the checksum covers
+        # exactly the bytes sitting next to it.
         run: |
-          sha256sum docker_volumes/manage.sh | awk '{print $1 "  manage.sh"}' > manage.sh.sha256
-          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md manage.sh.sha256
+          cp docker_volumes/manage.sh manage.sh
+          sha256sum manage.sh > manage.sh.sha256
+          cat manage.sh.sha256
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            # A release is already there - it's the maintainer's, so only add
+            # the files. --clobber keeps a re-run idempotent.
+            echo "Release $GITHUB_REF_NAME exists - attaching files, leaving its title and notes alone"
+            gh release upload "$GITHUB_REF_NAME" manage.sh manage.sh.sha256 --clobber
+          else
+            echo "No release for $GITHUB_REF_NAME yet - creating one from the CHANGELOG"
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" \
+              --notes-file release-notes.md manage.sh manage.sh.sha256
+          fi
