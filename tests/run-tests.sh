@@ -170,7 +170,7 @@ assert_no_action "UP:alpha"
 begin "archives: prefix apps (vault/vault2) never cross - prune and restore"
 apps vault vault2
 mkdir -p "$SANDBOX/backup"
-#vault's own legacy no-separator archive (pre-0.4.1), and vault2's newer one
+#vault's own legacy no-separator archive (pre-0.4.0), and vault2's newer one
 echo v1 | tar -cjf "$SANDBOX/backup/vault2026-08-01.tar.bz2" -T /dev/null 2>/dev/null || : >"$SANDBOX/backup/vault2026-08-01.tar.bz2"
 sleep 1
 : >"$SANDBOX/backup/vault22026-08-03.tar.bz2"
@@ -282,6 +282,27 @@ assert_out "1 unhealthy"
 assert_out "unhealthy: beta"
 assert_out "Updated 1 of 2 apps"
 assert_action "UP:beta"     #it did start - health is what failed
+
+begin "lock: a pid-less lock is reported, never silently fatal"
+#A run killed between mkdir and the pid write (or a full disk) leaves a lock
+#with no owner recorded. That must not abort the script under set -e with no
+#output at all, and must not be stolen either - we can't tell if it's live.
+apps alpha
+printf 'alpha\n' >"$DD_STATE/up"
+mkdir "$SANDBOX/.dockerdance.lock"
+run stop alpha
+assert_status 1
+assert_out "no owner recorded"
+assert_no_action "STOP:alpha"
+#doctor must still print its whole report rather than stopping mid-way
+run doctor
+assert_status 0
+assert_out "no owner recorded"
+assert_out "settings:"           #the section printed after the lock check
+rmdir "$SANDBOX/.dockerdance.lock"
+run stop alpha                    #and the folder works again once cleared
+assert_status 0
+assert_action "STOP:alpha"
 
 begin "missing app folder: reported, run continues"
 

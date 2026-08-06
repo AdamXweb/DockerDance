@@ -226,24 +226,45 @@ run_step() {
   return 0
 }
 
+#Is process $1 still running? ps is asked first because it can see other
+#users' processes: kill -0 only reports "not permitted" for those, which
+#would make someone else's live run look dead and let us steal their lock.
+#Where ps has no -p (busybox) this falls back to kill -0.
+pid_alive() {
+  ps -p "$1" >/dev/null 2>&1 && return 0
+  kill -0 "$1" 2>/dev/null
+}
+
+#Read the pid recorded in the lock, or "" when there isn't a readable one.
+#The `|| true` matters: an unguarded assignment from a failing command
+#substitution aborts the whole script under set -e, and acquire_lock is
+#called as the last command of an AND-OR list, where errexit still applies.
+lock_pid() {
+  lp=$(cat "$LOCK_DIR/pid" 2>/dev/null) || lp=""
+  printf '%s' "$lp"
+}
+
 acquire_lock() {
   [ -n "$HAVE_LOCK" ] && return 0
   if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     #A lock whose recorded process is gone is left over from a crash or a
-    #reboot - clear it and try once more. (kill -0 can't tell a foreign
-    #user's live process from a dead one, but the lock sits inside this
-    #user's own docker_volumes folder, so that ambiguity doesn't arise.)
-    al_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null)
-    if [ -n "$al_pid" ] && ! kill -0 "$al_pid" 2>/dev/null; then
+    #reboot - clear it and try once more. A lock with no readable pid can't
+    #be judged, so it's left alone and reported rather than stolen.
+    al_pid=$(lock_pid)
+    if [ -n "$al_pid" ] && ! pid_alive "$al_pid"; then
       warn "Clearing a stale lock left by exited run (pid $al_pid)"
-      rm -rf "$LOCK_DIR"
+      rm -rf "$LOCK_DIR" 2>/dev/null || true
     fi
     if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-      error "Another manage.sh run is active here (lock: $LOCK_DIR, pid ${al_pid:-unknown})."
+      if [ -n "$al_pid" ]; then
+        error "Another manage.sh run is active here (lock: $LOCK_DIR, pid $al_pid)."
+      else
+        error "A lock with no owner recorded is in the way: $LOCK_DIR - remove it if no run is active."
+      fi
       exit 1
     fi
   fi
-  echo "$$" >"$LOCK_DIR/pid"
+  echo "$$" >"$LOCK_DIR/pid" 2>/dev/null || true
   HAVE_LOCK=1
 }
 
@@ -1058,7 +1079,7 @@ backup_app() {
 
 #Newest-first list of $1's own backup archives. The name after the app part
 #must be exactly a date (with an optional _HHMMSS), in either the current
-#'app_YYYY-MM-DD' form or the pre-0.4.1 'appYYYY-MM-DD' form - so an app
+#'app_YYYY-MM-DD' form or the pre-0.4.0 'appYYYY-MM-DD' form - so an app
 #whose name extends another's (vault / vault2) never matches its neighbour's
 #archives. A bare glob did, which let BACKUP_KEEP prune the wrong app's
 #backups and restore pick the wrong archive.
@@ -1401,11 +1422,13 @@ run_doctor() {
     fi
   fi
   if [ -d "$LOCK_DIR" ]; then
-    dr_lockpid=$(cat "$LOCK_DIR/pid" 2>/dev/null)
-    if [ -n "$dr_lockpid" ] && kill -0 "$dr_lockpid" 2>/dev/null; then
+    dr_lockpid=$(lock_pid)
+    if [ -n "$dr_lockpid" ] && pid_alive "$dr_lockpid"; then
       dwarn "A run lock is held by an active run (pid $dr_lockpid)"
-    else
+    elif [ -n "$dr_lockpid" ]; then
       dwarn "A stale run lock exists ($LOCK_DIR) - the next state-changing command will clear it"
+    else
+      dwarn "A lock with no owner recorded exists ($LOCK_DIR) - remove it if no run is active"
     fi
   else
     dok "No stale run lock"
@@ -1491,7 +1514,7 @@ update_self() {
     error "The downloaded script failed a syntax check - not installing it."
     exit 1
   fi
-  #Releases from v0.4.1 publish a checksum next to the script; verify when
+  #Releases from v0.4.0 publish a checksum next to the script; verify when
   #it's there (and this host can hash). Older releases simply don't have one.
   expected_sha=$(fetch_url "https://github.com/$SELF_REPO/releases/download/$latest_tag/manage.sh.sha256" 2>/dev/null | awk 'NR==1{print $1}') || expected_sha=""
   if [ -n "$expected_sha" ]; then
